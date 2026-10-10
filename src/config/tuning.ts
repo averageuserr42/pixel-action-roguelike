@@ -31,6 +31,11 @@ export interface EnemyPressure {
   chargeSpeedCap: number;
   /** Пауза до следующего врага, пока на поле меньше целевого числа. */
   spawnIntervalMs: number;
+  /**
+   * Шанс, что очередной враг придёт элитой (вид плюс одно свойство). Часть
+   * строки режима, а не отдельная константа: хардкор должен быть жёстче целиком.
+   */
+  eliteChance: number;
 }
 
 export const TUNING = {
@@ -130,6 +135,8 @@ export const TUNING = {
     /** Дистанция появления как доля меньшей стороны поля. */
     spawnFactor: 0.47,
     radius: 5,
+    /** С какого уровня игрока приходят элиты: раньше четвёртого — только обычные. */
+    eliteMinLevel: 4,
     /**
      * Потолок длительности рывка. Сама длительность считается на замахе из
      * дистанции до игрока (выпад обязан его достать), а этот потолок не даёт
@@ -254,6 +261,7 @@ export const TUNING = {
       chargeSpeedCap: 300,
       /** Пауза до следующего врага, пока на поле меньше целевого числа. */
       spawnIntervalMs: 900,
+      eliteChance: 0.12,
     },
     hardcore: {
       baseEnemies: 3,
@@ -267,6 +275,7 @@ export const TUNING = {
       chargeSpeedPerLevel: 7,
       chargeSpeedCap: 330,
       spawnIntervalMs: 650,
+      eliteChance: 0.18,
     },
   } as Record<RunMode, EnemyPressure>,
 
