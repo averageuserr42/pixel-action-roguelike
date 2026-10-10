@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      Без viewport-fit=cover: браузер сам оставляет игру в безопасной области,
+      и HUD не заезжает под «чёлку» или строку состояния телефона.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pixel Action Roguelike</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0d0b12;
+        overflow: hidden;
+        touch-action: none;
+      }
+      body {
+        display: grid;
+        place-items: center;
+      }
+      /* Пиксель-арт: никакого сглаживания при масштабировании холста. */
+      #game canvas {
+        display: block;
+        image-rendering: pixelated;
+        image-rendering: crisp-edges;
+      }
+
+      /* Заглушка для вертикального экрана: игра ландшафтная. */
+      .overlay[hidden] {
+        display: none;
+      }
+      .overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: grid;
+        place-items: center;
+        background: #0d0b12;
+        font-family: ui-monospace, monospace;
+        color: #a9a3c9;
+        text-align: center;
+      }
+      .overlay__card {
+        display: grid;
+        justify-items: center;
+        gap: 18px;
+        padding: 24px;
+      }
+      .overlay__phone {
+        width: 54px;
+        height: 92px;
+        border: 2px solid #6f6991;
+        border-radius: 10px;
+        animation: turn 1.8s ease-in-out infinite;
+      }
+      @keyframes turn {
+        0%,
+        25% {
+          transform: rotate(0deg);
+        }
+        60%,
+        100% {
+          transform: rotate(-90deg);
+        }
+      }
+      .overlay__title {
+        margin: 0;
+        font-size: 18px;
+        letter-spacing: 0.02em;
+      }
+      .overlay__note {
+        margin: 0;
+        font-size: 13px;
+        color: #6f6991;
+      }
+      .overlay__button {
+        padding: 12px 22px;
+        font: inherit;
+        font-size: 15px;
+        color: #0d0b12;
+        background: #ffe066;
+        border: 0;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      .overlay__button:active {
+        background: #ffd23f;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="game"></div>
+
+    <div id="rotate-hint" class="overlay" hidden>
+      <div class="overlay__card">
+        <div class="overlay__phone" aria-hidden="true"></div>
+        <h1 class="overlay__title">Поверни телефон горизонтально</h1>
+        <p class="overlay__note">Игра ландшафтная: в вертикали арена не помещается.</p>
+        <button id="rotate-hint-fullscreen" class="overlay__button" type="button">
+          Во весь экран
+        </button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
