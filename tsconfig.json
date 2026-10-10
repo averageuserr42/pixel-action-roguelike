@@ -4,6 +4,9 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    // Тесты импортируют node:test и node:assert; tsc 7 сам эти типы не
+    // подхватывает, ему нужен явный список (проверено: без строки — TS2591).
+    "types": ["node"],
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
