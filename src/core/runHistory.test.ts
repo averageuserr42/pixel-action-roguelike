@@ -9,9 +9,11 @@ import {
   serializeHistory,
   type RunResult,
 } from './runHistory';
+import { RUN_RECORD_VERSION } from './runRecord';
 
 function result(over: Partial<RunResult> = {}): RunResult {
   return {
+    version: RUN_RECORD_VERSION,
     at: 1,
     seed: 1,
     mode: 'normal',
@@ -65,6 +67,18 @@ test('подозрительные поля приводятся к безопа
   const parsed = parseHistory(JSON.stringify([{ ...result(), picks: [1, 'nrg_cap', null], valid: 'нет' }]));
   assert.deepEqual(parsed[0].picks, ['nrg_cap']);
   assert.equal(parsed[0].valid, true, 'не-`false` значит действителен');
+});
+
+test('прогоны других правил в таблицу не попадают', () => {
+  // Запись без версии — это прогон старых правил (до брони); запись с другой
+  // версией — прогон будущих или прошлых контрактов. Обе не сравнимы с текущей.
+  const legacy = { ...result(), version: undefined } as unknown as RunResult;
+  const foreign = result({ version: RUN_RECORD_VERSION + 1 });
+  const current = result({ at: 9 });
+  const parsed = parseHistory(JSON.stringify([legacy, foreign, current]));
+  assert.deepEqual(parsed.map((r) => r.at), [9], 'только записи текущих правил');
+  // Лучший по чужой таблице тоже не находится: рекорд из другой игры — не рекорд.
+  assert.equal(bestOf([foreign, legacy])?.at ?? null, null);
 });
 
 test('сериализация переживает круговой разбор', () => {

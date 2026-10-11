@@ -25,6 +25,7 @@ import {
 } from '../core/runHistory';
 import {
   createRunRecord,
+  RUN_RECORD_VERSION,
   type RunMode,
   type RunRecord,
   type RunProfile,
@@ -1388,6 +1389,9 @@ export class GameScene extends Phaser.Scene {
    */
   private saveResult(): void {
     const result: RunResult = {
+      // Правила, которыми сыгран забег: история держит их вместе с записью и
+      // не смешивает прогоны разных контрактов (см. runHistory.asResult).
+      version: RUN_RECORD_VERSION,
       at: Date.now(),
       seed: this.seed,
       mode: this.mode,
