@@ -43,10 +43,19 @@ import {
 } from '../core/runStats';
 import { copyText, HISTORY_KEY, INTRO_KEY, loadText, saveText } from '../core/store';
 import { isTouchDevice, VIEW } from '../core/viewport';
-import { Ally, isWingKind, type AllyContext, type AllyKind } from '../entities/ally';
-import { Enemy, enemyTargetCount } from '../entities/enemy';
+import { Ally, deployCost, isWingKind, type AllyContext, type AllyKind } from '../entities/ally';
+import { Enemy } from '../entities/enemy';
+import { enemySpawnIntervalAt, enemyTargetCount } from '../systems/pressure';
 import { FixedStep } from '../sim/fixedStep';
-import { add, chargeNorm, createCharge, setCap, stepCharge, type Charge } from '../systems/charge';
+import {
+  add,
+  chargeNorm,
+  createCharge,
+  setCap,
+  spend,
+  stepCharge,
+  type Charge,
+} from '../systems/charge';
 import {
   addPickup,
   collect,
@@ -205,12 +214,8 @@ export class GameScene extends Phaser.Scene {
     enemies: [],
     shots: null as unknown as Projectiles,
     damage: (enemy, amount) => this.damage(enemy, amount),
-    charge: this.charge,
-    onDry: () => this.reportDry(),
-    onSpend: (cost) => noteSpend(this.stats, cost),
     turretRateMult: 1,
     spiritRateMult: 1,
-    costMult: 1,
     turretPierce: 0,
     spiritPierce: 0,
     moteFastRechase: false,
@@ -234,6 +239,11 @@ export class GameScene extends Phaser.Scene {
   private dashCdT = 0;
   private iFramesT = 0;
   private dashBufferT = 0;
+  /**
+   * Остаток пула ошибок. Контакт теперь снимает один удар, а не забег: смерть
+   * приходит на третьем — и только если игрок не вышел из-под следующего.
+   */
+  private hp = TUNING.player.hits;
   private restartRequested = false;
   private dead = false;
   /** false, пока забег не начался: до первого действия профиль помощи ещё уточняется. */
@@ -257,6 +267,7 @@ export class GameScene extends Phaser.Scene {
     this.dashCdT = 0;
     this.iFramesT = 0;
     this.dashBufferT = 0;
+    this.hp = TUNING.player.hits;
     this.vel = { x: 0, y: 0 };
     this.prevVel.x = 0;
     this.prevVel.y = 0;
@@ -378,7 +389,7 @@ export class GameScene extends Phaser.Scene {
 
     // Стартовая группа: поле не должно пустовать ни секунды, иначе первые
     // секунды забега снова становятся паузой. Углы разведены по кругу.
-    const initial = enemyTargetCount(this.level, this.mode);
+    const initial = enemyTargetCount(this.level, this.mode, 0);
     for (let i = 0; i < initial; i++) this.spawnEnemy((i / initial) * Math.PI * 2);
 
     // Стартовый набор: ствола у игрока нет, урон наносят только фигуры, поэтому
@@ -675,8 +686,8 @@ export class GameScene extends Phaser.Scene {
 
     this.allyContext.turretRateMult = this.build.turretRateMult;
     this.allyContext.spiritRateMult = this.build.spiritRateMult;
-    // Карты энергии: цена действий и пробивание у союзников.
-    this.allyContext.costMult = this.build.costMult;
+    // Карты энергии: пробивание у союзников. Цена постановки в контекст не идёт:
+    // платит сцена в момент вызова, поэтому и множитель цены живёт там же.
     this.allyContext.turretPierce = this.build.turretPierce;
     this.allyContext.spiritPierce = this.build.spiritPierce;
     this.allyContext.moteFastRechase = this.build.moteFastRechase;
@@ -703,16 +714,22 @@ export class GameScene extends Phaser.Scene {
     // Режиссёр спавна: держим целевое число живых врагов. Раньше новый враг
     // приходил только после смерти предыдущего — поле пустовало, и стоящий
     // игрок ничего не терял. Теперь наоборот: убыль сразу восполняется.
-    const spawnTarget = enemyTargetCount(this.level, this.mode);
+    // Кривая давления идёт по ВРЕМЕНИ забега: первая минута — разгон, дальше
+    // ступени. Числа живут строкой режима, здесь только выбор ступени.
+    const elapsedMs = this.stats.timeMs;
+    const spawnTarget = enemyTargetCount(this.level, this.mode, elapsedMs);
     this.spawnTimerMs -= ms;
     if (this.enemies.length < spawnTarget && this.spawnTimerMs <= 0) {
       this.spawnEnemy();
-      this.spawnTimerMs = TUNING.enemyPressure[this.mode].spawnIntervalMs;
+      this.spawnTimerMs = enemySpawnIntervalAt(this.mode, elapsedMs);
     }
 
+    // Контакт — удар по пулу, а не конец забега. Окно неуязвимости после удара
+    // шире окна рывка: тело врага остаётся рядом ещё несколько шагов, и без окна
+    // один проход выпада снимал бы все три удара сразу.
     for (const e of this.enemies) {
       if (distance(this.pos, e.pos) <= TUNING.player.radius + e.radius && this.iFramesT === 0) {
-        this.die();
+        this.takeHit();
         break;
       }
     }
@@ -1051,18 +1068,29 @@ export class GameScene extends Phaser.Scene {
    */
   private spawnForCard(card: Card): void {
     const e = card.effects;
-    if (e.maxTurrets) {
-      while (this.countAllies('turret') < this.build.maxTurrets) this.addAlly('turret', this.pos);
-    }
-    if (e.maxDroneMines) {
-      while (this.countAllies('drone') < this.build.maxDroneMines) this.addAlly('drone', this.pos);
-    }
-    if (e.maxSpirits) {
-      while (this.countAllies('spirit') < this.build.maxSpirits) this.addAlly('spirit', this.pos);
-    }
+    if (e.maxTurrets) this.deployUpTo('turret', this.build.maxTurrets);
+    if (e.maxDroneMines) this.deployUpTo('drone', this.build.maxDroneMines);
+    if (e.maxSpirits) this.deployUpTo('spirit', this.build.maxSpirits);
     if (e.maxSwarms) {
-      const wanted = this.build.maxSwarms * TUNING.progression.motesPerSwarm;
-      while (this.countAllies('mote') < wanted) this.addAlly('mote', this.pos);
+      this.deployUpTo('mote', this.build.maxSwarms * TUNING.progression.motesPerSwarm);
+    }
+  }
+
+  /**
+   * Постановка фигур до предела билда: Ток платится ЗА ВЫЗОВ, один раз. Не хватило
+   * — фигура не встаёт вовсе (половину цены не списываем), а игрок узнаёт причину
+   * тостом. Потолок числа фигур задаёт билд, а не цена выстрела: именно так
+   * ограничены суммонеры в Deadlock, Diablo и PoE 2.
+   */
+  private deployUpTo(kind: AllyKind, limit: number): void {
+    while (this.countAllies(kind) < limit) {
+      const price = deployCost(kind) * this.build.costMult;
+      if (!spend(this.charge, price)) {
+        this.reportDeployDry();
+        return;
+      }
+      noteSpend(this.stats, price);
+      this.addAlly(kind, this.pos);
     }
   }
 
@@ -1106,12 +1134,12 @@ export class GameScene extends Phaser.Scene {
     this.showToast(`ПРОФЕССИЯ: ${branchTitle(branch)}`, '#ffb703');
   }
 
-  /** Первый отказ фигур из-за пустого пула: правило показывается один раз за забег. */
-  private reportDry(): void {
+  /** Не хватило Тока на постановку фигуры: правило показывается раз за забег. */
+  private reportDeployDry(): void {
     noteRefusal(this.stats);
     if (this.dryTold) return;
     this.dryTold = true;
-    this.showToast('ФИГУРЫ БЕЗ ПИТАНИЯ', '#8b86a8');
+    this.showToast('НЕ ХВАТАЕТ ТОКА НА ФИГУРУ', '#8b86a8');
   }
 
   /** Разовое сообщение по центру: им живут закрепление профессии и гаснущее крыло. */
@@ -1240,6 +1268,25 @@ export class GameScene extends Phaser.Scene {
     // jitter — один бросок сида на двоих: он задаёт и слот на кольце, и разброс
     // первой паузы перед рывком.
     this.enemies.push(new Enemy(this, at, this.level, this.mode, this.rng()));
+  }
+
+  /**
+   * Удар по игроку: цена ошибки, а не конец забега. Отклик обязателен — без него
+   * первый удар читался бы как бесплатный, и третий заставал бы врасплох.
+   */
+  private takeHit(): void {
+    this.hp--;
+    this.iFramesT = TUNING.player.hitInvulnMs;
+    this.sfx.play('hit');
+    this.juice.shake('hit');
+    this.juice.burst(this.pos.x, this.pos.y, HIT_RING_COLOR, 'hit');
+    this.juice.popup(
+      this.pos.x,
+      this.pos.y - TUNING.player.radius * 4,
+      '-1',
+      '#ff4d6d',
+    );
+    if (this.hp <= 0) this.die();
   }
 
   private die(): void {
@@ -1408,8 +1455,12 @@ export class GameScene extends Phaser.Scene {
     // Время и лучший забег видны прямо в бою: сравнивать себя хочется не только
     // после смерти. Отладочные i-frames убраны — в отчёте они не нужны.
     const best = bestOf(this.history);
+    // Пул ошибок виден в бою: узнать о нём на экране смерти поздно, а шкала Тока
+    // об этом не говорит ничего.
+    const lives =
+      '█'.repeat(Math.max(0, this.hp)) + '░'.repeat(Math.max(0, TUNING.player.hits - this.hp));
     this.status.setText(
-      `dash ${dash} · время ${formatClock(this.stats.timeMs)}${best ? ` · лучший ${formatClock(best.timeMs)}` : ''}`,
+      `жизни ${lives} · dash ${dash} · время ${formatClock(this.stats.timeMs)}${best ? ` · лучший ${formatClock(best.timeMs)}` : ''}`,
     );
 
     this.layoutHud();

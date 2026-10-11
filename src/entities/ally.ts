@@ -2,7 +2,6 @@ import Phaser from 'phaser';
 import { TUNING } from '../config/tuning';
 import { clampToBounds, type Vec2 } from '../core/math';
 import { VIEW } from '../core/viewport';
-import { canAfford, spend, type Charge } from '../systems/charge';
 import type { Projectiles } from '../systems/projectiles';
 import type { Enemy } from './enemy';
 
@@ -32,6 +31,26 @@ export function isWingKind(kind: AllyKind): boolean {
   return WING_KINDS.includes(kind);
 }
 
+/**
+ * Цена ПОСТАНОВКИ фигуры. Ток платится один раз, при вызове: дальше фигура
+ * работает сама, а её число ограничивает потолок ростера из билда. Так сделано у
+ * Соломона (Deadlock), в Diablo и в PoE 2 — налога за каждое действие фигуры нет
+ * ни в одной из них. Цена растёт от роли: крыло ходит с игроком, устройство
+ * работает всегда.
+ */
+export function deployCost(kind: AllyKind): number {
+  switch (kind) {
+    case 'turret':
+      return TUNING.charge.deployTurret;
+    case 'drone':
+      return TUNING.charge.deployDrone;
+    case 'spirit':
+      return TUNING.charge.deploySpirit;
+    case 'mote':
+      return TUNING.charge.deployMote;
+  }
+}
+
 export interface AllyContext {
   playerPos: Vec2;
   /** Куда смотрит игрок: от этого направления строится крыло. */
@@ -42,17 +61,9 @@ export interface AllyContext {
   shots: Projectiles;
   /** Единственный путь смерти врага: отсюда же приходит учёт опыта. */
   damage(enemy: Enemy, amount: number): void;
-  /** Общий запас Тока: без него фигура не действует вовсе. */
-  charge: Charge;
-  /** Первый отказ из-за пустого пула: сцена показывает тост ровно один раз. */
-  onDry(): void;
   /** Множители темпа из карт: механик ускоряет турели, суммонер — духов. */
   turretRateMult: number;
   spiritRateMult: number;
-  /** Множитель цены действий: карта экономии делает Ток дешевле. */
-  costMult: number;
-  /** Сцена узнаёт о каждой удачной трате: без этого телеметрия не сойдётся. */
-  onSpend(cost: number): void;
   /** Крос-карты ЭНЕРГЕТИК×МЕХАНИК и ЭНЕРГЕТИК×СУММОНЕР: пробивание. */
   turretPierce: number;
   spiritPierce: number;
@@ -86,17 +97,6 @@ export class Ally {
   private rearmMs = 0;
   /** Игрок встал — крыло сейчас не работает. Отдельно от перезарядки: причины видны по разному. */
   private idle = false;
-  /** Пул пуст: фигура тускнеет, чтобы причина читалась без текста. */
-  private dry = false;
-  /**
-   * Остаток паузы между учтёнными отказами. Голодная фигура переспрашивает
-   * каждый шаг симуляции (120 раз в секунду), но отказ — это СОБЫТИЕ: одна
-   * неоплаченная попытка действия. Без паузы отчёты показывали 8559 отказов за
-   * 67 секунд — на порядок больше, чем было бы выстрелов, и баланс считался бы
-   * по мусору. Пауза равна собственному интервалу роли, поэтому число отказов
-   * равно числу потерянных действий.
-   */
-  private refuseGateMs = 0;
   private target: Enemy | null = null;
 
   constructor(scene: Phaser.Scene, kind: AllyKind, slot: number, at: Vec2) {
@@ -130,10 +130,8 @@ export class Ally {
     const ms = dt * 1000;
     this.cooldownMs -= ms;
     this.rearmMs = Math.max(0, this.rearmMs - ms);
-    this.refuseGateMs = Math.max(0, this.refuseGateMs - ms);
     // Крылья работают только в бою: спутники не должны выигрывать забег вместо игрока.
     this.idle = !ctx.playerActive && WING_KINDS.includes(this.kind);
-    this.dry = false;
 
     switch (this.kind) {
       case 'turret':
@@ -154,7 +152,7 @@ export class Ally {
   render(): void {
     this.arc.setPosition(this.pos.x, this.pos.y);
     // Тусклый спутник — тот, что сейчас не работает: перезарядка или игрок встал.
-    this.arc.setAlpha(this.rearmMs > 0 || this.idle || this.dry ? 0.3 : 1);
+    this.arc.setAlpha(this.rearmMs > 0 || this.idle ? 0.3 : 1);
   }
 
   destroy(): void {
@@ -167,11 +165,6 @@ export class Ally {
 
     const enemy = this.nearestEnemy(ctx, TUNING.ally.turretRangeFactor * VIEW.minSide);
     if (!enemy) return;
-
-    if (!this.pay(ctx, TUNING.charge.costTurret)) {
-      this.refuse(ctx, TUNING.ally.turretFireIntervalMs * ctx.turretRateMult);
-      return;
-    }
 
     this.shootAt(
       enemy,
@@ -193,11 +186,6 @@ export class Ally {
 
     const enemy = this.nearestEnemy(ctx, TUNING.ally.spiritRangeFactor * VIEW.minSide, true);
     if (!enemy) return;
-
-    if (!this.pay(ctx, TUNING.charge.costSpirit)) {
-      this.refuse(ctx, TUNING.ally.spiritFireIntervalMs * ctx.spiritRateMult);
-      return;
-    }
 
     this.shootAt(
       enemy,
@@ -223,11 +211,6 @@ export class Ally {
       const dx = e.pos.x - this.pos.x;
       const dy = e.pos.y - this.pos.y;
       if (dx * dx + dy * dy <= reach * reach) {
-        // Мина без Тока не разряжается: остаётся заряженной и ждёт следующего контакта.
-        if (!this.pay(ctx, TUNING.charge.costDrone)) {
-          this.refuse(ctx, TUNING.ally.droneRearmMs);
-          return;
-        }
         ctx.damage(e, TUNING.ally.droneDamage);
         this.rearmMs = TUNING.ally.droneRearmMs;
         return;
@@ -254,15 +237,7 @@ export class Ally {
       const candidate = this.idle
         ? null
         : this.nearestEnemy(ctx, TUNING.ally.moteChaseRangeFactor * VIEW.minSide);
-      // Цель есть, а укус нечем оплатить — вот это и есть «фигуры без питания».
-      // Без этого сигнала мот просто висел бы в крыле, и голодный выводок ничем
-      // не отличался бы от сытого.
-      if (candidate && !this.canPay(ctx, TUNING.charge.costMote)) {
-        this.refuse(ctx, TUNING.ally.moteRearmMs);
-        this.target = null;
-      } else {
-        this.target = candidate;
-      }
+      this.target = candidate;
       this.followSlot(dt, ctx);
       return;
     }
@@ -273,12 +248,6 @@ export class Ally {
     const reach = this.radius + this.target.radius;
 
     if (dist <= reach) {
-      if (!this.pay(ctx, TUNING.charge.costMote)) {
-        this.refuse(ctx, TUNING.ally.moteRearmMs);
-        this.target = null;
-        this.followSlot(dt, ctx);
-        return;
-      }
       ctx.damage(this.target, TUNING.ally.moteDamage);
       // Крос МЕХАНИК×СУММОНЕР: рой не расходится на переформирование — мот той
       // же секундой ищет следующего. Без кроса — прежняя пауза на восстановление.
@@ -293,38 +262,6 @@ export class Ally {
     this.pos.x += (dx / dist) * step;
     this.pos.y += (dy / dist) * step;
     clampToBounds(this.pos, this.radius, VIEW.w, VIEW.h);
-  }
-
-  /**
-   * Отказ из-за пустого пула: фигура тускнеет, а сцена узнаёт о потере действия.
-   *
-   * Тускнеть фигура обязана каждый шаг голода — это её вид. А вот сообщать об
-   * отказе чаще, чем сама могла бы действовать, нельзя: переспрос идёт 120 раз в
-   * секунду, и счётчик превращался бы в меру скорости симуляции. Пауза приходит
-   * аргументом и равна интервалу роли: турель переспрашивает по своему темпу,
-   * мот — по своему, и каждый отказ соответствует одному потерянному действию.
-   */
-  private refuse(ctx: AllyContext, gateMs: number): void {
-    this.dry = true;
-    if (this.refuseGateMs > 0) return;
-    this.refuseGateMs = gateMs;
-    ctx.onDry();
-  }
-
-  /**
-   * Единственная точка оплаты действия: цена умножается на карту экономии, а
-   * сцена узнаёт о каждой удачной трате. Через неё проходят все четыре роли —
-   * иначе телеметрия считала бы только часть расходов.
-   */
-  private pay(ctx: AllyContext, cost: number): boolean {
-    const price = cost * ctx.costMult;
-    if (!spend(ctx.charge, price)) return false;
-    ctx.onSpend(price);
-    return true;
-  }
-
-  private canPay(ctx: AllyContext, cost: number): boolean {
-    return canAfford(ctx.charge, cost * ctx.costMult);
   }
 
   private nearestEnemy(ctx: AllyContext, range: number, allowDistanceZero = false): Enemy | null {

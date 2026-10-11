@@ -1,6 +1,5 @@
 import { TUNING } from '../config/tuning';
 import { kindsForLevel, type EnemyKind, type EnemyKindId } from '../config/enemyKinds';
-import type { RunMode } from '../core/runRecord';
 import type { Rng } from '../core/rng';
 
 /**
@@ -60,9 +59,9 @@ function pickKind(level: number, rng: Rng): EnemyKind {
   return available[available.length - 1];
 }
 
-function pickElite(level: number, mode: RunMode, rng: Rng): EliteModifier | null {
+function pickElite(level: number, eliteChance: number, rng: Rng): EliteModifier | null {
   if (level < TUNING.enemy.eliteMinLevel) return null;
-  if (rng() >= TUNING.enemyPressure[mode].eliteChance) return null;
+  if (rng() >= eliteChance) return null;
   const index = Math.floor(rng() * ELITE_MODIFIERS.length);
   return ELITE_MODIFIERS[Math.min(index, ELITE_MODIFIERS.length - 1)];
 }
@@ -77,12 +76,12 @@ function pickElite(level: number, mode: RunMode, rng: Rng): EliteModifier | null
  */
 export function pickSpawn(
   level: number,
-  mode: RunMode,
+  eliteChance: number,
   alive: number,
   nonChasers: number,
   rng: Rng,
 ): SpawnPick {
-  const elite = pickElite(level, mode, rng);
+  const elite = pickElite(level, eliteChance, rng);
 
   // Держать кольцо важнее разнообразия: с одним врагом на поле игрок должен
   // получать именно того, кто его окружает, иначе окружения не будет вообще.

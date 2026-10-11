@@ -28,12 +28,12 @@ test('setCap подрезает пул, но не растит его сам', (
 
 test('spend: не хватает — не списывает, хватает — списывает', () => {
   const c = createCharge(20);
-  add(c, TUNING.charge.costDrone);
+  add(c, TUNING.charge.deployDrone);
   const before = c.amount;
-  assert.equal(canAfford(c, TUNING.charge.costDrone + 1), false);
-  assert.equal(spend(c, TUNING.charge.costDrone + 1), false);
+  assert.equal(canAfford(c, TUNING.charge.deployDrone + 1), false);
+  assert.equal(spend(c, TUNING.charge.deployDrone + 1), false);
   assert.equal(c.amount, before, 'отказ не должен менять пул');
-  assert.equal(spend(c, TUNING.charge.costDrone), true);
+  assert.equal(spend(c, TUNING.charge.deployDrone), true);
   assert.equal(c.amount, 0);
 });
 
@@ -86,14 +86,23 @@ test('больший потолок — больший защищённый за
   assert.equal(big.amount, 44 * 0.2, '«Ёмкость» обязана защищать больше Тока');
 });
 
-test('полный цикл: батареи оплачивают выстрелы турели', () => {
+test('полный цикл: батареи оплачивают постановку турелей', () => {
   const c = createCharge(baseCap());
   const batteries = Math.floor((baseCap() / BATTERY) * 2);
   for (let i = 0; i < batteries; i++) add(c, BATTERY);
   const stored = c.amount;
-  const affordable = Math.floor(stored / TUNING.charge.costTurret);
-  let fired = 0;
-  while (spend(c, TUNING.charge.costTurret)) fired++;
-  assert.equal(fired, affordable, `оплачено ${fired} выстрелов вместо ${affordable}`);
-  assert.equal(c.amount, 0);
+  const affordable = Math.floor(stored / TUNING.charge.deployTurret);
+  let deployed = 0;
+  while (spend(c, TUNING.charge.deployTurret)) deployed++;
+  assert.equal(
+    deployed,
+    affordable,
+    `поставлено ${deployed} турелей вместо ${affordable} по цене постановки`,
+  );
+  // Цена постановки больше единицы, поэтому пул обнуляется не всегда: важно, что
+  // остатка больше не хватает ни на одну фигуру.
+  assert.ok(
+    c.amount < TUNING.charge.deployTurret,
+    `остаток ${c.amount} не должен хватать на постановку`,
+  );
 });

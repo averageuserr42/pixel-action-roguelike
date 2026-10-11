@@ -4,6 +4,13 @@ import { clampToBounds, type Vec2 } from '../core/math';
 import type { RunMode } from '../core/runRecord';
 import { VIEW } from '../core/viewport';
 
+/**
+ * Насколько игроку нужно выйти из досягаемости, чтобы замах отменился. Именно
+ * выход, а не дрожь на месте: иначе замах отменялся бы от любого микросдвига и
+ * телеграф перестал бы что-либо значить.
+ */
+const WINDUP_CANCEL_FACTOR = 1.25;
+
 export type EnemyState = 'seek' | 'windup' | 'charge' | 'recover';
 
 const STATE_COLOR: Record<EnemyState, number> = {
@@ -39,14 +46,15 @@ export function enemyChargeSpeedForLevel(level: number, mode: RunMode): number {
  * пустовало, а стоящий игрок ничего не терял. Теперь число врагов — решение
  * дизайна, привязанное к уровню, и оно общее для спавна и для проверки.
  */
-export function enemyTargetCount(level: number, mode: RunMode): number {
-  const p = TUNING.enemyPressure[mode];
-  const extra = Math.floor(Math.max(0, level - 1) / p.extraEnemyEveryLevels);
-  return Math.min(p.baseEnemies + extra, p.maxEnemies);
-}
-
 export class Enemy {
   readonly arc: Phaser.GameObjects.Arc;
+  /**
+   * Кольцо-телеграф: где именно и когда ударит выпад. Враги, выпад и снаряды —
+   * всё это круги, и угрозу приходилось читать по цвету, а смерть приходила за
+   * 500 мс. Видимая точка удара — единственное, что отличает замах от просто
+   * красного круга.
+   */
+  private readonly tele: Phaser.GameObjects.Arc;
   readonly pos: Vec2;
   /** HP на момент появления: константа врага, а не «сколько осталось». */
   readonly maxHp: number;
@@ -114,6 +122,11 @@ export class Enemy {
     this.chargeCdMs = jitter * p.chargeCooldownMs;
     this.arc = scene.add.circle(at.x, at.y, TUNING.enemy.radius, STATE_COLOR.seek).setDepth(9);
     if (this.maxHp > TUNING.enemy.maxHp) this.arc.setStrokeStyle(1, SCALED_STROKE_COLOR);
+    this.tele = scene.add
+      .circle(at.x, at.y, TUNING.enemy.radius, STATE_COLOR.windup, 0)
+      .setStrokeStyle(2, STATE_COLOR.windup)
+      .setDepth(8)
+      .setVisible(false);
   }
 
   get radius(): number {
@@ -285,8 +298,15 @@ export class Enemy {
         break;
       }
 
-      case 'windup':
+      case 'windup': {
         // Во время замаха враг стоит: движение на телеграфе читалось бы как рывок.
+        // А если игрок вышел из досягаемости — удар отменяется. Телеграф, который
+        // нельзя обмануть уходом, — это не телеграф, а таймер до урона.
+        if (dist > this.windupRange * WINDUP_CANCEL_FACTOR) {
+          this.state = 'seek';
+          this.chargeCdMs = Math.max(this.chargeCdMs, TUNING.enemy.windupCancelMs);
+          break;
+        }
         if (this.timerMs <= 0) {
           this.state = 'charge';
           // Выпад обязан ПРОЙТИ позицию игрока. Фиксированная длительность не
@@ -299,6 +319,7 @@ export class Enemy {
           this.timerMs = Math.min(TUNING.enemy.maxChargeMs, (reach / this.chargeSpeed) * 1000);
         }
         break;
+      }
 
       case 'charge':
         this.pos.x += this.dir.x * this.chargeSpeed * dt;
@@ -325,11 +346,24 @@ export class Enemy {
   render(): void {
     this.arc.setPosition(this.pos.x, this.pos.y);
     this.arc.setFillStyle(this.hitFlashMs > 0 ? HIT_FLASH_COLOR : STATE_COLOR[this.state]);
-    const pulse = this.state === 'windup' ? 1 + 0.35 * Math.sin(this.timerMs * 0.03) : 1;
+    const windup = this.state === 'windup';
+    const pulse = windup ? 1 + 0.35 * Math.sin(this.timerMs * 0.03) : 1;
     this.arc.setScale(pulse);
+
+    // Кольцо садится к точке удара по мере отсчёта, а к моменту выпада становится
+    // ярче: размер и цвет вместе говорят, где и когда будет удар.
+    this.tele.setVisible(windup);
+    if (windup) {
+      const left = Math.max(0, Math.min(1, this.timerMs / this.windupMs));
+      const reach = this.windupRange * TUNING.enemy.telegraphFactor;
+      this.tele.setPosition(this.aim.x, this.aim.y);
+      this.tele.setRadius(reach * (0.35 + 0.65 * left));
+      this.tele.setAlpha(0.4 + 0.6 * (1 - left));
+    }
   }
 
   destroy(): void {
     this.arc.destroy();
+    this.tele.destroy();
   }
 }

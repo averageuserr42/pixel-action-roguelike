@@ -15,10 +15,10 @@ test('подсказки не запирают друг друга: голод �
   const intro = createIntro();
   nextHint(intro, QUIET);
   // Факты про батарею и трату ещё не наступили, а голод — наступил.
-  assert.equal(nextHint(intro, { ...QUIET, dryMs: 2500 }), 'БЕЗ ТОКА ФИГУРЫ МОЛЧАТ');
+  assert.equal(nextHint(intro, { ...QUIET, dryMs: 2500 }), 'БЕЗ ТОКА НОВЫЕ ФИГУРЫ НЕ ВСТАЮТ');
   assert.equal(nextHint(intro, { ...QUIET, idleMs: 3000 }), 'СТОИШЬ — КРЫЛО ГАСНЕТ');
   // Теперь батарея: подсказка про трату открылась вместе с ней.
-  assert.equal(nextHint(intro, { ...QUIET, batteries: 1 }), 'ФИГУРЫ ТРАТЯТ ТОК НА КАЖДОЕ ДЕЙСТВИЕ');
+  assert.equal(nextHint(intro, { ...QUIET, batteries: 1 }), 'ТОК ПЛАТИТСЯ ЗА ПОСТАНОВКУ ФИГУРЫ');
   assert.ok(introMuted(intro));
 });
 
@@ -44,5 +44,5 @@ test('порог простоя и голода не срабатывает на
   nextHint(fresh, QUIET);
   assert.equal(nextHint(fresh, { ...QUIET, dryMs: 2000 }), null, 'ровно на пороге — ещё нет');
   assert.equal(nextHint(fresh, { ...QUIET, idleMs: 2500 }), null, 'ровно на пороге — ещё нет');
-  assert.equal(nextHint(fresh, { ...QUIET, dryMs: 2001 }), 'БЕЗ ТОКА ФИГУРЫ МОЛЧАТ');
+  assert.equal(nextHint(fresh, { ...QUIET, dryMs: 2001 }), 'БЕЗ ТОКА НОВЫЕ ФИГУРЫ НЕ ВСТАЮТ');
 });
