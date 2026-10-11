@@ -56,6 +56,12 @@ export interface CardEffects {
   batteryBonus?: number;
   /** Сколько батарей помещается на поле сверх уровня. */
   extraBatterySlots?: number;
+  /**
+   * Множитель паузы между батареями. Место на поле ничего не даёт: доход задаёт
+   * ТЕМП появления батарей, а не число свободных кружков (замер стенда: поле
+   * успевает пустеть между появлениями). Поэтому карта ускоряет сам темп.
+   */
+  supplyIntervalMult?: number;
   /** Множитель цены действий фигур (меньше — дешевле). */
   costMult?: number;
   /**
@@ -106,7 +112,7 @@ export const CARDS: readonly Card[] = [
     id: 'nrg_cap',
     branch: 'energy',
     title: 'Ёмкость',
-    blurb: 'Потолок Тока выше на 8 — в нём живёт ещё пара фигур.',
+    blurb: 'Потолок Тока выше на 8: держать его полным проще.',
     maxStacks: 3,
     effects: { chargeCap: 8 },
   },
@@ -114,17 +120,20 @@ export const CARDS: readonly Card[] = [
     id: 'nrg_cell',
     branch: 'energy',
     title: 'Плотная батарея',
-    blurb: 'Батарея даёт на 2 Тока больше.',
+    blurb: 'Батарея даёт на 2 Тока больше — дольше держится напряжение.',
     maxStacks: 3,
     effects: { batteryBonus: 2 },
   },
   {
     id: 'nrg_field',
     branch: 'energy',
-    title: 'Сборка',
-    blurb: 'На поле помещается ещё одна батарея.',
+    title: 'Разгон батарей',
+    blurb: 'Батареи появляются на 15% чаще.',
     maxStacks: 2,
-    effects: { extraBatterySlots: 1 },
+    // Было «+1 батарея на поле» — и это не давало ничего: доход задаёт темп
+    // появления, а не число мест (замер стенда: поле успевает пустеть между
+    // батареями при любом билде). Карта, которой нечего менять, — мёртвая карта.
+    effects: { supplyIntervalMult: 0.85 },
   },
   {
     id: 'nrg_economy',
@@ -232,7 +241,9 @@ export interface BuildState {
   batteryBonus: number;
   /** Сколько батарей помещается на поле сверх уровня. */
   extraBatterySlots: number;
-  /** Множитель цены действий фигур. */
+  /** Множитель паузы между батареями: меньше единицы — темп выше. */
+  supplyIntervalMult: number;
+  /** Множитель цены постановки фигур. */
   costMult: number;
   /** Доля потолка, ниже которой Ток не утекает. */
   decayReserve: number;
@@ -260,6 +271,7 @@ export function createBuild(): BuildState {
     // ПОПРАВКУ карт: два независимых источника батарейной цены разъехались бы.
     batteryBonus: 0,
     extraBatterySlots: 0,
+    supplyIntervalMult: 1,
     costMult: 1,
     decayReserve: 0,
     maxTurrets: 0,
@@ -309,6 +321,7 @@ export function applyCard(build: BuildState, card: Card): boolean {
   if (e.chargeCap !== undefined) build.chargeCap += e.chargeCap;
   if (e.batteryBonus !== undefined) build.batteryBonus += e.batteryBonus;
   if (e.extraBatterySlots !== undefined) build.extraBatterySlots += e.extraBatterySlots;
+  if (e.supplyIntervalMult !== undefined) build.supplyIntervalMult *= e.supplyIntervalMult;
   if (e.costMult !== undefined) build.costMult *= e.costMult;
   if (e.decayReserve !== undefined) build.decayReserve += e.decayReserve;
   if (e.maxTurrets !== undefined) build.maxTurrets += e.maxTurrets;

@@ -1,8 +1,11 @@
 import Phaser from 'phaser';
+import { kindById, type EnemyKind, type EnemyKindId } from '../config/enemyKinds';
 import { TUNING } from '../config/tuning';
 import { clampToBounds, type Vec2 } from '../core/math';
 import type { RunMode } from '../core/runRecord';
 import { VIEW } from '../core/viewport';
+import type { Projectiles } from '../systems/projectiles';
+import type { EliteModifier } from '../systems/spawnDirector';
 
 /**
  * Насколько игроку нужно выйти из досягаемости, чтобы замах отменился. Именно
@@ -23,6 +26,12 @@ const STATE_COLOR: Record<EnemyState, number> = {
 const HIT_FLASH_COLOR = 0xffffff;
 /** Обводка врага, который уже перерос базовые числа: сложность видно с одного взгляда. */
 const SCALED_STROKE_COLOR = 0xff9f1c;
+/** Обводка элиты — по ней видно, ЧЕМ именно она опасна, ещё до удара. */
+const ELITE_STROKE: Record<EliteModifier, number> = {
+  shielded: 0xffd166,
+  swift: 0x63d2ff,
+  volatile: 0xff4d6d,
+};
 
 /**
  * Статы врага на текущем уровне игрока. Здесь и живёт кривая сложности:
@@ -46,8 +55,33 @@ export function enemyChargeSpeedForLevel(level: number, mode: RunMode): number {
  * пустовало, а стоящий игрок ничего не терял. Теперь число врагов — решение
  * дизайна, привязанное к уровню, и оно общее для спавна и для проверки.
  */
+/**
+ * Что нужно врагу для появления. Объектом, а не десятком позиционных чисел: у
+ * вида и элиты свои множители, и перепутать их местами слишком легко.
+ */
+export interface EnemyOptions {
+  level: number;
+  mode: RunMode;
+  /** Бросок сида: слот на кольце плюс разброс первой паузы перед рывком. */
+  jitter: number;
+  kindId: EnemyKindId;
+  elite: EliteModifier | null;
+  /** Добавка HP от элиты (щит): складывается с множителем вида. */
+  eliteHpBonus: number;
+  /** Множитель скорости от элиты. */
+  eliteSpeedMult: number;
+}
+
 export class Enemy {
   readonly arc: Phaser.GameObjects.Arc;
+  /** Вид: поведение, цвет, размер и множители. */
+  readonly kind: EnemyKind;
+  /** Свойство элиты или null. Вид элиты виден обводкой, а не словами. */
+  readonly elite: EliteModifier | null;
+  /** Занят ли слот на кольце окружения: стрелок и танк кольцо не держат. */
+  get usesRing(): boolean {
+    return this.kind.usesRing;
+  }
   /**
    * Полоса-телеграф: КУДА пойдёт выпад. Показывает направление, но не конец —
    * точку удара игрок считает сам. Кольцо в самой точке (первая версия) читалось
@@ -106,21 +140,33 @@ export class Enemy {
   private chargeCdMs = 0;
   private dir: Vec2 = { x: 0, y: 0 };
   private hitFlashMs = 0;
+  /** Дистанция удержания стрелка и его личная пауза между выстрелами. */
+  private readonly shooterRange: number;
+  private fireCdMs = 0;
 
-  constructor(scene: Phaser.Scene, at: Vec2, level = 1, mode: RunMode = 'normal', jitter = 0.5) {
-    const p = TUNING.enemyPressure[mode];
+  constructor(scene: Phaser.Scene, at: Vec2, opts: EnemyOptions) {
+    const p = TUNING.enemyPressure[opts.mode];
+    this.kind = kindById(opts.kindId);
+    this.elite = opts.elite;
     this.pos = { x: at.x, y: at.y };
-    this.maxHp = enemyHpForLevel(level);
+    // Порядок — как в описании вида: сначала множитель, потом предел, и только
+    // потом щит элиты: щит — запас ПОВЕРХ вида, а не вместо него.
+    const scaled = enemyHpForLevel(opts.level) * this.kind.hpMult + opts.eliteHpBonus;
+    this.maxHp = Math.min(Math.ceil(scaled), TUNING.enemy.hpCap);
     this.hp = this.maxHp;
-    this.chargeSpeed = enemyChargeSpeedForLevel(level, mode);
-    this.seekSpeed = p.seekSpeed;
+    this.chargeSpeed = enemyChargeSpeedForLevel(opts.level, opts.mode);
+    this.seekSpeed = p.seekSpeed * this.kind.speedMult * opts.eliteSpeedMult;
     this.windupMs = p.windupMs;
     this.windupRange = p.windupRangeFactor * VIEW.minSide;
     this.chargeCooldownMs = p.chargeCooldownMs;
-    this.orbitJitter = jitter * Math.PI * 2;
-    this.chargeCdMs = jitter * p.chargeCooldownMs;
-    this.arc = scene.add.circle(at.x, at.y, TUNING.enemy.radius, STATE_COLOR.seek).setDepth(9);
-    if (this.maxHp > TUNING.enemy.maxHp) this.arc.setStrokeStyle(1, SCALED_STROKE_COLOR);
+    this.orbitJitter = opts.jitter * Math.PI * 2;
+    this.chargeCdMs = opts.jitter * p.chargeCooldownMs;
+    this.shooterRange = TUNING.enemy.shooterStandoffFactor * VIEW.minSide;
+    this.fireCdMs = opts.jitter * TUNING.enemy.shooterFireIntervalMs;
+    this.arc = scene.add.circle(at.x, at.y, this.kind.radius, this.kind.color).setDepth(9);
+    // Обводка: элита — своим цветом (чем опасна), выросший по уровню враг — общей.
+    if (this.elite) this.arc.setStrokeStyle(1, ELITE_STROKE[this.elite]);
+    else if (this.maxHp > TUNING.enemy.maxHp) this.arc.setStrokeStyle(1, SCALED_STROKE_COLOR);
     this.tele = scene.add
       .rectangle(at.x, at.y, 1, 2, STATE_COLOR.windup, 0.4)
       .setOrigin(0, 0.5)
@@ -129,7 +175,7 @@ export class Enemy {
   }
 
   get radius(): number {
-    return TUNING.enemy.radius;
+    return this.kind.radius;
   }
 
   get enemyState(): EnemyState {
@@ -170,12 +216,30 @@ export class Enemy {
    * (interceptActive) цель другая: назначенная сценой точка на маршруте
    * игрока — кольцо едет вместе с игроком и на вираже его не встречает.
    */
-  step(dt: number, playerPos: Vec2, slotAngle: number, playerVel: Vec2): void {
+  step(
+    dt: number,
+    playerPos: Vec2,
+    slotAngle: number,
+    playerVel: Vec2,
+    shots: Projectiles | null = null,
+  ): void {
     const ms = dt * 1000;
     this.hitFlashMs = Math.max(0, this.hitFlashMs - ms);
     this.interceptAgeMs += ms;
     this.timerMs -= ms;
     this.chargeCdMs = Math.max(0, this.chargeCdMs - ms);
+    this.fireCdMs = Math.max(0, this.fireCdMs - ms);
+
+    // Виды без замаха живут своей веткой: машина кольца для них — работа вхолостую,
+    // она гоняет их по орбите вместо прямого удара и вместо обстрела.
+    if (this.kind.behavior === 'walk') {
+      this.stepWalk(dt, playerPos);
+      return;
+    }
+    if (this.kind.behavior === 'standoff-shoot') {
+      this.stepShooter(dt, playerPos, shots);
+      return;
+    }
 
     // Личный слот доворачивается к назначенному: строй переживает и смерть
     // соседа, и смену порядка по углу без броска в другую сторону.
@@ -342,9 +406,67 @@ export class Enemy {
     }
   }
 
+  /**
+   * Танк: идёт напролом. Ни замаха, ни кольца — его угроза в том, что он не
+   * отступает и его не сбить парой попаданий. Держать его в строю бессмысленно:
+   * строй — это про окружение, а он про давление телом.
+   */
+  private stepWalk(dt: number, playerPos: Vec2): void {
+    const dx = playerPos.x - this.pos.x;
+    const dy = playerPos.y - this.pos.y;
+    const dist = Math.hypot(dx, dy) || 0.001;
+    this.pos.x += (dx / dist) * this.seekSpeed * dt;
+    this.pos.y += (dy / dist) * this.seekSpeed * dt;
+    clampToBounds(this.pos, this.kind.radius, VIEW.w, VIEW.h);
+    this.state = 'seek';
+  }
+
+  /**
+   * Стрелок: держит дистанцию и стреляет. Ближе — отходит, дальше — подходит.
+   * Его угроза ЛЕТИТ, поэтому в карусели ему делать нечего.
+   */
+  private stepShooter(dt: number, playerPos: Vec2, shots: Projectiles | null): void {
+    const dx = playerPos.x - this.pos.x;
+    const dy = playerPos.y - this.pos.y;
+    const dist = Math.hypot(dx, dy) || 0.001;
+    const nx = dx / dist;
+    const ny = dy / dist;
+    const keep = this.shooterRange;
+    // Мёртвая зона у самой границы: без неё он дёргался бы вперёд-назад каждый шаг.
+    if (dist > keep * 1.1) {
+      this.pos.x += nx * this.seekSpeed * dt;
+      this.pos.y += ny * this.seekSpeed * dt;
+    } else if (dist < keep * 0.9) {
+      this.pos.x -= nx * this.seekSpeed * dt;
+      this.pos.y -= ny * this.seekSpeed * dt;
+    }
+    clampToBounds(this.pos, this.kind.radius, VIEW.w, VIEW.h);
+    this.state = 'seek';
+
+    // Стреляет только по тому, кто в досягаемости выстрела, и не чаще своего темпа.
+    if (shots === null || this.fireCdMs > 0 || dist > keep * 1.6) return;
+    shots.spawn(
+      this.pos,
+      { x: nx, y: ny },
+      {
+        speed: TUNING.enemy.shooterShotSpeed,
+        damage: 1,
+        lifeMs: TUNING.enemy.shooterShotLifeMs,
+        pierce: 0,
+        explosiveRadius: 0,
+        hostile: true,
+      },
+      this.kind.radius + 1,
+    );
+    this.fireCdMs = TUNING.enemy.shooterFireIntervalMs;
+  }
+
   render(): void {
     this.arc.setPosition(this.pos.x, this.pos.y);
-    this.arc.setFillStyle(this.hitFlashMs > 0 ? HIT_FLASH_COLOR : STATE_COLOR[this.state]);
+    // Цвет вида — это его опознание; у погонялы вместо него цвет ФАЗЫ, потому что
+    // её цикл «замах → выпад → откат» и есть главное, что о ней надо знать.
+    const base = this.kind.usesStateColors ? STATE_COLOR[this.state] : this.kind.color;
+    this.arc.setFillStyle(this.hitFlashMs > 0 ? HIT_FLASH_COLOR : base);
     const windup = this.state === 'windup';
     const pulse = windup ? 1 + 0.35 * Math.sin(this.timerMs * 0.03) : 1;
     this.arc.setScale(pulse);

@@ -52,7 +52,7 @@ import {
   type AllyKind,
 } from '../entities/ally';
 import { Enemy } from '../entities/enemy';
-import { enemySpawnIntervalAt, enemyTargetCount } from '../systems/pressure';
+import { eliteChanceAt, enemySpawnIntervalAt, enemyTargetCount } from '../systems/pressure';
 import { FixedStep } from '../sim/fixedStep';
 import {
   add,
@@ -66,6 +66,7 @@ import {
   stepCharge,
   type Charge,
 } from '../systems/charge';
+import { eliteNumbers, pickSpawn } from '../systems/spawnDirector';
 import {
   addPickup,
   collect,
@@ -231,6 +232,9 @@ export class GameScene extends Phaser.Scene {
     enemies: [],
     shots: null as unknown as Projectiles,
     damage: (enemy, amount) => this.damage(enemy, amount),
+    // Цель враждебных выстрелов стрелка: тот же путь, что и контакт, поэтому
+    // окно неуязвимости после удара защищает и от пули, и от тела.
+    player: { pos: { x: 0, y: 0 }, radius: TUNING.player.radius, hit: () => this.hitByShot() },
     turretRateMult: 1,
     spiritRateMult: 1,
     turretPierce: 0,
@@ -261,6 +265,8 @@ export class GameScene extends Phaser.Scene {
    * приходит на третьем — и только если игрок не вышел из-под следующего.
    */
   private hp = TUNING.player.hits;
+  /** Идёт ли напряжение: Ток выше порога — фигуры работают быстрее. */
+  private boosted = false;
   private restartRequested = false;
   private dead = false;
   /** false, пока забег не начался: до первого действия профиль помощи ещё уточняется. */
@@ -672,7 +678,10 @@ export class GameScene extends Phaser.Scene {
     // Предметы: распад, появление, подбор. Ток приходит двумя путями — батареи
     // за движение и осколки за урон, — и оба обязаны быть видны в отчёте.
     stepAge(this.pickups, dt);
-    if (takeSpawn(this.pickups, dt, this.supply.spawnIntervalMs, this.batteryLimit())) {
+    // «Разгон батарей» ускоряет ПОЯВЛЕНИЕ, а не расширяет поле: место на поле не
+    // даёт ничего, потому что доход задаёт темп (замер стенда).
+    const batteryInterval = this.supply.spawnIntervalMs * this.build.supplyIntervalMult;
+    if (takeSpawn(this.pickups, dt, batteryInterval, this.batteryLimit())) {
       this.spawnBattery();
     }
     collect(this.pickups, this.pos, TUNING.pickups.pickupRadius, this.tally);
@@ -696,6 +705,9 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.allyContext.playerPos = this.pos;
+    // Позиция цели для враждебных выстрелов — тот же объект, что и у игрока:
+    // обновляем ссылку, потому что create() создаёт позицию заново.
+    if (this.allyContext.player) this.allyContext.player.pos = this.pos;
     this.allyContext.enemies = this.enemies;
     // Крылья держатся по бокам от направления взгляда и работают только пока
     // игрок играет: движение и дэш — это и есть участие, стояние — нет.
@@ -709,8 +721,12 @@ export class GameScene extends Phaser.Scene {
       this.showToast('КРЫЛЬЯ ЖДУТ ДЕЙСТВИЯ', '#8b86a8');
     }
 
-    this.allyContext.turretRateMult = this.build.turretRateMult;
-    this.allyContext.spiritRateMult = this.build.spiritRateMult;
+    // НАПРЯЖЕНИЕ: пока Ток держится выше порога, фигуры работают быстрее. Это и
+    // есть роль ветки энергии — она влияет на бой, а не на бюджет постановок.
+    this.boosted = chargeNorm(this.charge) >= TUNING.charge.boostFromNorm;
+    const boost = this.boosted ? TUNING.charge.boostRateMult : 1;
+    this.allyContext.turretRateMult = this.build.turretRateMult * boost;
+    this.allyContext.spiritRateMult = this.build.spiritRateMult * boost;
     // Карты энергии: пробивание у союзников. Цена постановки в контекст не идёт:
     // платит сцена в момент вызова, поэтому и множитель цены живёт там же.
     this.allyContext.turretPierce = this.build.turretPierce;
@@ -777,7 +793,14 @@ export class GameScene extends Phaser.Scene {
 
     const order = this.slotOrder;
     order.length = 0;
-    for (const e of this.enemies) order.push(e);
+    // Слоты делим только между теми, кто стоит на КОЛЬЦЕ: стрелок и танк кольца не
+    // держат (usesRing), и если дать им слоты, окружение станет жиже — их места
+    // никому не достанутся.
+    let ring = 0;
+    for (const e of this.enemies) {
+      order.push(e);
+      if (e.usesRing) ring++;
+    }
     const px = this.pos.x;
     const py = this.pos.y;
     order.sort(
@@ -785,10 +808,12 @@ export class GameScene extends Phaser.Scene {
         Math.atan2(a.pos.y - py, a.pos.x - px) - Math.atan2(b.pos.y - py, b.pos.x - px),
     );
 
-    const stepAngle = (Math.PI * 2) / alive;
-    this.assignInterceptors(dt, alive);
-    for (let rank = 0; rank < alive; rank++) {
-      order[rank].step(dt, this.pos, this.orbitT + rank * stepAngle, this.vel);
+    const stepAngle = ring > 0 ? (Math.PI * 2) / ring : Math.PI * 2;
+    this.assignInterceptors(dt, ring);
+    let rank = 0;
+    for (const e of order) {
+      const slotAngle = e.usesRing ? this.orbitT + rank++ * stepAngle : this.orbitT;
+      e.step(dt, this.pos, slotAngle, this.vel, this.shots);
     }
   }
 
@@ -850,6 +875,8 @@ export class GameScene extends Phaser.Scene {
       let pick: Enemy | null = null;
       let pickDist = Infinity;
       for (const e of this.enemies) {
+        // Перехват — роль ПОГОНИ: танк и стрелок её не берут (canIntercept).
+        if (!e.kind.canIntercept) continue;
         if (e.interceptActive || e.enemyState !== 'seek') continue;
         const d = Math.hypot(e.pos.x - this.pos.x, e.pos.y - this.pos.y);
         if (d <= ringR) continue; // внутри кольца враг занят рывком
@@ -992,11 +1019,57 @@ export class GameScene extends Phaser.Scene {
       this.killed++;
       noteKill(this.stats);
       this.gainXp(TUNING.progression.xpPerKill);
+      this.splitEnemy(e);
+      this.blastVolatile(e);
     }
     // Тряска одна на пачку убийств: удар по нескольким врагам в один шаг —
     // это одно событие для глаза, а не три подряд.
     if (this.pendingKills.length > 0) this.juice.shake('kill');
     this.pendingKills.length = 0;
+  }
+
+  /**
+   * Делитель расщепляется на двух мелких: убить его надо ДО подхода, иначе одна
+   * цель становится двумя. Дети — погонялы, поэтому второй генерации не бывает:
+   * поле не должно зарастать из одного врага.
+   */
+  private splitEnemy(e: Enemy): void {
+    if (e.kind.behavior !== 'split-on-death') return;
+    const children = TUNING.enemy.splitChildren;
+    for (let i = 0; i < children; i++) {
+      const angle = (i / children) * Math.PI * 2;
+      this.enemies.push(
+        new Enemy(
+          this,
+          {
+            x: e.pos.x + Math.cos(angle) * TUNING.enemy.radius * 2,
+            y: e.pos.y + Math.sin(angle) * TUNING.enemy.radius * 2,
+          },
+          {
+            level: this.level,
+            mode: this.mode,
+            jitter: this.rng(),
+            kindId: 'charger',
+            elite: null,
+            eliteHpBonus: 0,
+            eliteSpeedMult: 1,
+          },
+        ),
+      );
+    }
+  }
+
+  /** «Нестабильная» элита взрывается на смерти: добивать её вплотную дорого. */
+  private blastVolatile(e: Enemy): void {
+    if (e.elite !== 'volatile') return;
+    this.juice.burst(e.pos.x, e.pos.y, HIT_RING_COLOR, 'hit');
+    if (distance(this.pos, e.pos) <= TUNING.enemy.volatileBlastRadius) this.hitByShot();
+  }
+
+  /** Попадание враждебного выстрела: тот же пул ошибок, что и контакт. */
+  private hitByShot(): void {
+    if (this.iFramesT > 0) return;
+    this.takeHit();
   }
 
   private gainXp(amount: number): void {
@@ -1295,10 +1368,33 @@ export class GameScene extends Phaser.Scene {
       }
     }
     if (!at) return;
-    // Враг появляется под текущий уровень игрока: кривая сложности живёт в enemy.
+    // Кто именно появится — решает режиссёр спавна: он держит кольцо, потолок
+    // не-погонял и взвешенный выбор среди видов, которые уже открыты уровнем.
+    // До этого вида он был написан и протестирован, но сцена его не звала вовсе
+    // — в игре существовал ровно один враг при четырёх описанных.
+    let nonChasers = 0;
+    for (const e of this.enemies) if (!e.usesRing) nonChasers++;
+    const pick = pickSpawn(
+      this.level,
+      eliteChanceAt(this.mode, this.stats.timeMs),
+      this.enemies.length,
+      nonChasers,
+      this.rng,
+    );
+    const elite = eliteNumbers(pick.elite);
     // jitter — один бросок сида на двоих: он задаёт и слот на кольце, и разброс
     // первой паузы перед рывком.
-    this.enemies.push(new Enemy(this, at, this.level, this.mode, this.rng()));
+    this.enemies.push(
+      new Enemy(this, at, {
+        level: this.level,
+        mode: this.mode,
+        jitter: this.rng(),
+        kindId: pick.kind,
+        elite: pick.elite,
+        eliteHpBonus: elite.hpBonus,
+        eliteSpeedMult: elite.speedMult,
+      }),
+    );
   }
 
   /**
@@ -1479,7 +1575,8 @@ export class GameScene extends Phaser.Scene {
     // Занятый Ток виден числом: без него непонятно, почему шкала не полна при
     // живом выводке — а это и есть цена силы фигур.
     const busy = this.charge.held > 0 ? ` занято ${this.charge.held}` : '';
-    const charge = `  ток: ${chargeBar(this.charge)}${busy}`;
+    // ▲ — напряжение: без него ускорение выводка не отличить от просто удачного билда.
+    const charge = `  ток: ${chargeBar(this.charge)}${busy}${this.boosted ? ' ▲' : ''}`;
     this.pickLine.setText(
       `ур. ${this.level}  опыт: ${this.xp}/${xpForNextLevel(this.level)}${picked}${charge}`,
     );

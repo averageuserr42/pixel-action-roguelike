@@ -2,7 +2,7 @@ import Phaser from 'phaser';
 import { TUNING } from '../config/tuning';
 import { clampToBounds, type Vec2 } from '../core/math';
 import { VIEW } from '../core/viewport';
-import type { Projectiles } from '../systems/projectiles';
+import type { HitTargets, Projectiles } from '../systems/projectiles';
 import type { Enemy } from './enemy';
 
 export type AllyKind = 'turret' | 'drone' | 'spirit' | 'mote';
@@ -69,16 +69,13 @@ export function holdCost(kind: AllyKind): number {
   }
 }
 
-export interface AllyContext {
+export interface AllyContext extends HitTargets {
   playerPos: Vec2;
   /** Куда смотрит игрок: от этого направления строится крыло. */
   playerFacing: Vec2;
   /** Игрок в бою (двигался или уходил в дэш недавно). false — крылья гаснут. */
   playerActive: boolean;
-  enemies: Enemy[];
   shots: Projectiles;
-  /** Единственный путь смерти врага: отсюда же приходит учёт опыта. */
-  damage(enemy: Enemy, amount: number): void;
   /** Множители темпа из карт: механик ускоряет турели, суммонер — духов. */
   turretRateMult: number;
   spiritRateMult: number;

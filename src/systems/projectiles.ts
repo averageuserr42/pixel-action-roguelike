@@ -18,12 +18,20 @@ export interface ShotSpec {
   pierce: number;
   /** Радиус разрыва в игровых единицах. 0 — обычная пуля. */
   explosiveRadius: number;
+  /**
+   * Враждебный выстрел: бьёт по ИГРОКУ, а не по врагам. Один пул на обе
+   * стороны выбран не из экономии: правила полёта и попадания у выстрелов
+   * одинаковые, различается только сторона, которую они проверяют.
+   */
+  hostile?: boolean;
 }
 
 export interface HitTargets {
   enemies: Enemy[];
   /** Единственный путь смерти врага: отсюда же приходит и учёт опыта. */
   damage(enemy: Enemy, amount: number): void;
+  /** Цель враждебных выстрелов. Нет её — выстрел летит в пустоту. */
+  player?: { pos: Vec2; radius: number; hit(): void };
 }
 
 interface Projectile {
@@ -37,6 +45,7 @@ interface Projectile {
   /** Последний задетый враг: без этого пробивающая пуля выпаливала бы весь
    *  запас пробитий в одну и ту же цель, пока летит сквозь неё. */
   lastHit: Enemy | null;
+  hostile: boolean;
   alive: boolean;
 }
 
@@ -63,6 +72,7 @@ export class Projectiles {
         pierceLeft: 0,
         explosiveRadius: 0,
         lastHit: null,
+        hostile: false,
         alive: false,
       });
     }
@@ -92,6 +102,7 @@ export class Projectiles {
     free.pierceLeft = spec.pierce;
     free.explosiveRadius = spec.explosiveRadius;
     free.lastHit = null;
+    free.hostile = spec.hostile === true;
     free.pos.x = from.x + dir.x * muzzle;
     free.pos.y = from.y + dir.y * muzzle;
     free.vel.x = dir.x * spec.speed;
@@ -118,7 +129,20 @@ export class Projectiles {
         dead = true;
       }
 
-      if (!dead) {
+      if (!dead && p.hostile) {
+        const player = targets.player;
+        if (player) {
+          const dx = player.pos.x - p.pos.x;
+          const dy = player.pos.y - p.pos.y;
+          const r = TUNING.shots.projectileRadius + player.radius;
+          if (dx * dx + dy * dy <= r * r) {
+            player.hit();
+            dead = true;
+          }
+        }
+      }
+
+      if (!dead && !p.hostile) {
         const enemy = this.enemyAt(p, targets.enemies);
         if (enemy) {
           targets.damage(enemy, p.damage);
