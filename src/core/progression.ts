@@ -1,4 +1,5 @@
 import { TUNING } from '../config/tuning';
+import type { EnemyKindId } from '../config/enemyKinds';
 import type { Rng } from './rng';
 
 /**
@@ -403,4 +404,31 @@ export function xpForNextLevel(level: number): number {
   return (
     TUNING.progression.levelBaseKills + Math.floor(level / TUNING.progression.levelStepLevels)
   );
+}
+
+/**
+ * Сколько опыта стоит УБИЙСТВО ЦЕЛИ, а не «одно убийство».
+ *
+ * Зачем. Опыт был плоским (1 за любого), и это тихо награждало за добивание
+ * мелочи: когда рой получил общую цель и начал танковать толстых (см.
+ * systems/targeting), темп убийств упал — замер: 50 → 39 за тот же забег, а
+ * вместе с ним и уровни (10 → 8), хотя суммарный урон вырос не стал. То есть
+ * правильное поведение (убить танка) наказывалось медленной прогрессией, а
+ * неправильное (расклевать погонял) — быстрой.
+ *
+ * Теперь цена цели в опыте следует той же логике, что и цена в уроне: танк
+ * даёт столько, сколько стоит его убийство (его HP ×3 от базы врага), стрелок —
+ * меньше, но больше мелочи (его надо догонять, а он бьёт издалека), элита —
+ * надбавку за своё свойство. Делитель сознательно остаётся дешёвым: он и так
+ * даёт тройное убийство (сам плюс двое детей).
+ *
+ * Эффект на кривую намеренно нейтральный: за старый «плоский» темп убийств
+ * забег получает примерно столько же опыта, но уже за СМЫСЛОВЫЕ цели.
+ */
+export function xpForKill(kindId: EnemyKindId, elite: boolean): number {
+  let multiplier = 1;
+  if (kindId === 'tank') multiplier += 2;
+  else if (kindId === 'shooter') multiplier += 1;
+  if (elite) multiplier += 2;
+  return TUNING.progression.xpPerKill * multiplier;
 }

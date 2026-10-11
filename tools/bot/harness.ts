@@ -111,6 +111,10 @@ export function runBot(scene: unknown, opts: BotRunOptions): BotRunRecord {
   // — это own-свойство объекта, а объект сцены переживает перезапуск: забыв
   // вернуть метод, стенд оставил бы игрока без истории забегов и без звука.
   const unmute = [mute(s, 'saveResult')];
+  // Хранилище замораживается на КАЖДЫЙ прогон, а не только на серию: смерть пишет
+  // не одну историю забегов, а ещё и мету, поэтому одиночный прогон из консоли,
+  // забывший про `sweep`, выдал бы игроку медали за забеги бота.
+  const frozen = freezeStorage();
   restart(s, seed, mode);
   unmute.push(mute(s.sfx, 'play'));
   settleOffers(s, pickIndex);
@@ -138,6 +142,7 @@ export function runBot(scene: unknown, opts: BotRunOptions): BotRunRecord {
     }
   } finally {
     for (const restore of unmute) restore();
+    thawStorage(frozen);
   }
 
   // Мир не должен доигрывать сам. После возврата стенда настоящий луп сцены
@@ -271,7 +276,18 @@ function freezeStorage(): Record<string, string> {
   return snapshot;
 }
 
+/**
+ * Возврат слепка. Лишние ключи убираются: замер не только перезаписывает историю
+ * и мету, но и СОЗДАЁТ их в чистом браузере, а ключ, которого у игрока не было,
+ * возвратом одних только известных ключей не убрать.
+ */
 function thawStorage(snapshot: Record<string, string>): void {
+  const keys: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key !== null) keys.push(key);
+  }
+  for (const key of keys) if (!(key in snapshot)) localStorage.removeItem(key);
   for (const [key, value] of Object.entries(snapshot)) localStorage.setItem(key, value);
 }
 

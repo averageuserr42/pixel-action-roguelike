@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { ART, artScale } from '../config/art';
 import { kindById, type EnemyKind, type EnemyKindId } from '../config/enemyKinds';
 import { TUNING } from '../config/tuning';
 import { clampToBounds, type Vec2 } from '../core/math';
@@ -73,7 +74,10 @@ export interface EnemyOptions {
 }
 
 export class Enemy {
-  readonly arc: Phaser.GameObjects.Arc;
+  /** Спрайт вида. Цвет состояния и вспышка удара — это ТИНТ, а не заливка. */
+  readonly sprite: Phaser.GameObjects.Image;
+  /** Тонкое кольцо под спрайтом: элита и выросший по уровню враг. */
+  private readonly ring: Phaser.GameObjects.Arc;
   /** Вид: поведение, цвет, размер и множители. */
   readonly kind: EnemyKind;
   /** Свойство элиты или null. Вид элиты виден обводкой, а не словами. */
@@ -163,12 +167,18 @@ export class Enemy {
     this.chargeCdMs = opts.jitter * p.chargeCooldownMs;
     this.shooterRange = TUNING.enemy.shooterStandoffFactor * VIEW.minSide;
     this.fireCdMs = opts.jitter * TUNING.enemy.shooterFireIntervalMs;
-    this.arc = scene.add.circle(at.x, at.y, this.kind.radius, this.kind.color).setDepth(9);
-    // Обводка: элита — своим цветом (чем опасна), выросший по уровню враг — общей.
-    if (this.elite) this.arc.setStrokeStyle(1, ELITE_STROKE[this.elite]);
-    else if (this.maxHp > TUNING.enemy.maxHp) this.arc.setStrokeStyle(1, SCALED_STROKE_COLOR);
+    const art = ART[this.kind.id];
+    this.sprite = scene.add.image(at.x, at.y, art.key).setDepth(9);
+    this.sprite.setScale(artScale(art, this.sprite.height));
+    // Кольцо-отметка живёт ПОД спрайтом и только у тех, кого надо опознать заранее:
+    // элита — своим цветом (чем опасна), выросший по уровню — общим.
+    this.ring = scene.add
+      .circle(at.x, at.y, this.kind.radius + 3, 0)
+      .setStrokeStyle(1, this.elite ? ELITE_STROKE[this.elite] : SCALED_STROKE_COLOR)
+      .setDepth(8)
+      .setVisible(this.elite !== null || this.maxHp > TUNING.enemy.maxHp);
     this.tele = scene.add
-      .rectangle(at.x, at.y, 1, 2, STATE_COLOR.windup, 0.4)
+      .rectangle(at.x, at.y, 1, 2, STATE_COLOR.windup, 0.35)
       .setOrigin(0, 0.5)
       .setDepth(8)
       .setVisible(false);
@@ -462,14 +472,25 @@ export class Enemy {
   }
 
   render(): void {
-    this.arc.setPosition(this.pos.x, this.pos.y);
-    // Цвет вида — это его опознание; у погонялы вместо него цвет ФАЗЫ, потому что
-    // её цикл «замах → выпад → откат» и есть главное, что о ней надо знать.
-    const base = this.kind.usesStateColors ? STATE_COLOR[this.state] : this.kind.color;
-    this.arc.setFillStyle(this.hitFlashMs > 0 ? HIT_FLASH_COLOR : base);
+    this.sprite.setPosition(this.pos.x, this.pos.y);
+    this.ring.setPosition(this.pos.x, this.pos.y);
     const windup = this.state === 'windup';
-    const pulse = windup ? 1 + 0.35 * Math.sin(this.timerMs * 0.03) : 1;
-    this.arc.setScale(pulse);
+    // Вспышка удара — сплошной силуэт: попадание видно даже там, где спрайт тёмный.
+    if (this.hitFlashMs > 0) {
+      // В Phaser 4 заливка силуэта — это режим тинта FILL, а не отдельный метод.
+      this.sprite.setTint(HIT_FLASH_COLOR).setTintMode(Phaser.TintModes.FILL);
+    } else if (this.kind.usesStateColors) {
+      // Погоняла кричит ФАЗОЙ: её цикл «замах → выпад → откат» — главное о ней, и
+      // тинт спрайта читается тем же кодом, что и раньше читалась заливка.
+      this.sprite.setTint(STATE_COLOR[this.state]).setTintMode(Phaser.TintModes.MULTIPLY);
+    } else if (this.elite) {
+      this.sprite.setTint(ELITE_STROKE[this.elite]).setTintMode(Phaser.TintModes.MULTIPLY);
+    } else {
+      this.sprite.clearTint();
+    }
+    const art = ART[this.kind.id];
+    const base = artScale(art, this.sprite.height);
+    this.sprite.setScale(windup ? base * (1 + 0.2 * Math.sin(this.timerMs * 0.03)) : base);
 
     // Полоса лежит НА теле врага и растёт в сторону прицела: направление видно,
     // а конец не отмечен — место удара игрок считает сам. Яркость поднимается к
@@ -486,7 +507,8 @@ export class Enemy {
   }
 
   destroy(): void {
-    this.arc.destroy();
+    this.sprite.destroy();
+    this.ring.destroy();
     this.tele.destroy();
   }
 }

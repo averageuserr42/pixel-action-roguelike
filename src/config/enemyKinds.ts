@@ -39,6 +39,13 @@ export interface EnemyKind {
   usesRing: boolean;
   /** Может ли сцена назначить вид перехватчиком на маршруте игрока. */
   canIntercept: boolean;
+  /**
+   * Потолок вида на поле. Общего потолка не-погонял мало: он разрешает «три
+   * не-погонялы», и режиссёр набирал их танками — замер и ощущение игрока («танки
+   * плотноватые, три настакалось») совпали. Танк — угроза, которую надо обходить,
+   * а три обходить некуда: поле становится стеной.
+   */
+  maxOnField: number;
   /** Красится ли вид цветом фазы вместо своего цвета. */
   usesStateColors: boolean;
 }
@@ -60,6 +67,8 @@ export const ENEMY_KINDS: readonly EnemyKind[] = [
     usesRing: true,
     canIntercept: true,
     usesStateColors: true,
+    // Погонял много не бывает: они и есть кольцо, без них окружения нет вовсе.
+    maxOnField: 99,
   },
   {
     id: 'tank',
@@ -76,6 +85,7 @@ export const ENEMY_KINDS: readonly EnemyKind[] = [
     usesRing: false,
     canIntercept: false,
     usesStateColors: false,
+    maxOnField: 1,
   },
   {
     id: 'shooter',
@@ -90,6 +100,8 @@ export const ENEMY_KINDS: readonly EnemyKind[] = [
     usesRing: false,
     canIntercept: false,
     usesStateColors: false,
+    // Двое: обстрел с двух сторон — это задача, трое — уже расстрел без ответа.
+    maxOnField: 2,
   },
   {
     id: 'splitter',
@@ -107,6 +119,8 @@ export const ENEMY_KINDS: readonly EnemyKind[] = [
     usesRing: false,
     canIntercept: false,
     usesStateColors: false,
+    // Каждый становится двумя: трое делителей — это уже шесть целей из трёх.
+    maxOnField: 2,
   },
 ];
 

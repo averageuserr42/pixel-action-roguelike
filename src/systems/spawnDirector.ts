@@ -1,5 +1,5 @@
 import { TUNING } from '../config/tuning';
-import { kindsForLevel, type EnemyKind, type EnemyKindId } from '../config/enemyKinds';
+import { kindById, kindsForLevel, type EnemyKind, type EnemyKindId } from '../config/enemyKinds';
 import type { Rng } from '../core/rng';
 
 /**
@@ -25,12 +25,25 @@ export interface SpawnPick {
 export const ELITE_MODIFIERS: readonly EliteModifier[] = ['shielded', 'swift', 'volatile'];
 
 /**
+ * Сколько врагов каждого вида уже на поле. Режиссёр смотрит на живой состав, а
+ * не на один счётчик: у вида есть свой потолок (`maxOnField`), и без разбивки по
+ * видам его не проверить.
+ */
+export type KindCounts = Partial<Record<EnemyKindId, number>>;
+
+/**
  * Потолок не-погонял на поле. Без него поле заполонят стрелки и танки, кольцо
  * окружения исчезнет, и игра превратится в уклонение от пуль вместо охоты:
  * погоняла — единственный вид, который занимает слот на кольце.
  */
 export function nonChaserCap(alive: number): number {
   return Math.max(1, Math.ceil(alive / 3));
+}
+
+function countAlive(counts: KindCounts): number {
+  let alive = 0;
+  for (const id of Object.keys(counts) as EnemyKindId[]) alive += counts[id] ?? 0;
+  return alive;
 }
 
 /**
@@ -46,9 +59,16 @@ export function eliteSpeedMult(mod: EliteModifier): number {
   return mod === 'swift' ? 1.35 : 1;
 }
 
-/** Взвешенный выбор вида. Ролл идёт от нуля: при rng() === 0 берётся первый вид. */
-function pickKind(level: number, rng: Rng): EnemyKind {
-  const available = kindsForLevel(level);
+/**
+ * Взвешенный выбор вида. Ролл идёт от нуля: при rng() === 0 берётся первый вид.
+ *
+ * Виды, упёршиеся в свой `maxOnField`, из лотереи выпадают, а не заменяются
+ * погонялой: иначе на высоком уровне, где все не-погонялы уже на поле, вес
+ * погонялы рос бы от их присутствия и режиссёр зацикливался.
+ */
+function pickKind(level: number, counts: KindCounts, rng: Rng): EnemyKind {
+  const available = kindsForLevel(level).filter((kind) => (counts[kind.id] ?? 0) < kind.maxOnField);
+  if (available.length === 0) return kindById('charger');
   let total = 0;
   for (const kind of available) total += kind.spawnWeight;
   let roll = rng() * total;
@@ -77,11 +97,12 @@ function pickElite(level: number, eliteChance: number, rng: Rng): EliteModifier 
 export function pickSpawn(
   level: number,
   eliteChance: number,
-  alive: number,
-  nonChasers: number,
+  counts: KindCounts,
   rng: Rng,
 ): SpawnPick {
   const elite = pickElite(level, eliteChance, rng);
+  const alive = countAlive(counts);
+  const nonChasers = alive - (counts.charger ?? 0);
 
   // Держать кольцо важнее разнообразия: с одним врагом на поле игрок должен
   // получать именно того, кто его окружает, иначе окружения не будет вообще.
@@ -89,7 +110,7 @@ export function pickSpawn(
 
   if (nonChasers >= nonChaserCap(alive)) return { kind: 'charger', elite };
 
-  return { kind: pickKind(level, rng).id, elite };
+  return { kind: pickKind(level, counts, rng).id, elite };
 }
 
 /** Вид элиты отличается от обычного только числами, которые даёт эта пара. */

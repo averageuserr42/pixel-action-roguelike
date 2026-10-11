@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { ART, ART_FILES, artScale } from '../config/art';
 import { TUNING } from '../config/tuning';
 import { createIntro, introMuted, muteIntro, nextHint, type IntroState } from '../core/intro';
 import { approach, clampToBounds, distance, type Vec2 } from '../core/math';
@@ -7,6 +8,7 @@ import {
   branchTitle,
   createBuild,
   offerCards,
+  xpForKill,
   xpForNextLevel,
   type BranchId,
   type BuildState,
@@ -41,7 +43,18 @@ import {
   type RunStats,
   type StatsHead,
 } from '../core/runStats';
-import { copyText, HISTORY_KEY, INTRO_KEY, loadText, saveText } from '../core/store';
+import { copyText, HISTORY_KEY, INTRO_KEY, loadText, META_KEY, saveText } from '../core/store';
+import {
+  createMeta,
+  metaBonuses,
+  metaProgress,
+  nextGoal,
+  parseMeta,
+  serializeMeta,
+  unlockNew,
+  type Achievement,
+  type MetaState,
+} from '../core/meta';
 import { isTouchDevice, VIEW } from '../core/viewport';
 import {
   Ally,
@@ -66,7 +79,8 @@ import {
   stepCharge,
   type Charge,
 } from '../systems/charge';
-import { eliteNumbers, pickSpawn } from '../systems/spawnDirector';
+import { eliteNumbers, pickSpawn, type KindCounts } from '../systems/spawnDirector';
+import { pickFocusTarget } from '../systems/targeting';
 import {
   addPickup,
   collect,
@@ -86,11 +100,13 @@ import { Sfx, type AudioContextLike } from '../systems/sfx';
 import { CardPicker } from '../ui/cards';
 import { Juice } from '../ui/juice';
 
-const PLAYER_ALIVE_COLOR = 0xffe066;
+/**
+ * Цвета игрока — это ТИНТЫ спрайта: свой цвет ему не нужен (он и так один такой),
+ * а вот «неуязвим» и «мёртв» обязаны быть видны с одного взгляда.
+ */
 const PLAYER_IFRAMES_COLOR = 0xffffff;
 const PLAYER_DEAD_COLOR = 0x3a3550;
 const BATTERY_COLOR = 0xffd23f;
-const BATTERY_STROKE = 0x8a6f00;
 /**
  * Осколок цвета чистой энергии: он обязан отличаться и от батареи (жёлтой), и
  * от врагов (у тех свои цвета состояний), и от спутников. Светло-голубой не
@@ -98,7 +114,6 @@ const BATTERY_STROKE = 0x8a6f00;
  * а не как забытую батарею.
  */
 const DROP_COLOR = 0xeaf6ff;
-const DROP_STROKE = 0x5c7fa3;
 /** Кольца событий: попадание белое, смерть врага — цветом угрозы, тёплым. */
 const HIT_RING_COLOR = 0xffffff;
 const KILL_RING_COLOR = 0xff9f1c;
@@ -127,6 +142,10 @@ export class GameScene extends Phaser.Scene {
   private intro: IntroState = createIntro();
   /** История прошлых забегов: с чем сравнивать текущий. */
   private history: RunResult[] = [];
+  /** Мета: то, что забег оставляет после себя. Читается на старте, пишется на смерти. */
+  private meta: MetaState = createMeta();
+  /** Достижения, открытые ЭТИМ забегом: их показывают на экране смерти. */
+  private freshMedals: Achievement[] = [];
   /** Строки итога на экране смерти: их переставляет поворот экрана. */
   private summary: Phaser.GameObjects.Text[] = [];
   private bestLabel?: Phaser.GameObjects.Text;
@@ -136,7 +155,7 @@ export class GameScene extends Phaser.Scene {
 
   private controls!: InputHub;
   private grid!: Phaser.GameObjects.Graphics;
-  private player!: Phaser.GameObjects.Arc;
+  private player!: Phaser.GameObjects.Image;
   private deathText?: Phaser.GameObjects.Text;
   private hud!: Phaser.GameObjects.Text;
   /** Форма HUD: на узком поле одна строка не влезает, и он переносится на две. */
@@ -220,7 +239,7 @@ export class GameScene extends Phaser.Scene {
   /** Предметы Тока на поле: батареи и осколки. Правила — в systems/pickups. */
   private readonly pickups: PickupField = createPickupField();
   /** Круги под предметы. Пул, чтобы в игровом шаге не было аллокаций. */
-  private pickupArcs: Phaser.GameObjects.Arc[] = [];
+  private pickupArcs: Phaser.GameObjects.Image[] = [];
   /** Что собрал этот шаг. Переиспользуется: подбор идёт каждые 8 мс. */
   private readonly tally: PickupTally = createTally();
 
@@ -240,6 +259,7 @@ export class GameScene extends Phaser.Scene {
     turretPierce: 0,
     spiritPierce: 0,
     moteFastRechase: false,
+    swarmFocus: null,
   };
 
   /** Профиль помощи: кто играет и как. Отдельно от билда — он редко меняется. */
@@ -284,6 +304,15 @@ export class GameScene extends Phaser.Scene {
     this.sim = new FixedStep(TUNING.sim.stepMs, TUNING.sim.maxStepsPerFrame);
   }
 
+  /**
+   * Загрузка спрайтов. Список берётся из ART_FILES, а не собирается руками:
+   * тогда новый спрайт не может «забыть» загрузиться молча, а имя файла живёт
+   * в одном месте с его размером. Phaser ждёт preload до create сам.
+   */
+  preload(): void {
+    for (const art of ART_FILES) this.load.image(art.key, `assets/${art.file}`);
+  }
+
   create(): void {
     this.dead = false;
     this.dashT = 0;
@@ -307,11 +336,23 @@ export class GameScene extends Phaser.Scene {
     this.hudWrapped = false;
     this.hudSignature = '';
 
+    // Мета читается ДО сборки билда: её бонусы меняют и потолок, и стартовый
+    // запас, и стартовую стаю. Записывается она только на смерти — забег не
+    // имеет права открыть достижение, которого не завершил.
+    this.meta = parseMeta(loadText(META_KEY));
+    this.freshMedals = [];
+
     this.build = createBuild();
     // Стартовая стая — часть билда, а не отдельный подарок: карта «Стая» потом
     // добирает мотов до предела, и без этого учёта первая карта не дала бы
     // ничего.
     this.build.maxSwarms = TUNING.progression.startSwarms;
+    // Стартовые бонусы меты — добавки к билду, а не отдельная ветка: сцена ниже
+    // считает потолок и запас ровно теми же функциями, что и для карт.
+    const bonuses = metaBonuses(this.meta);
+    this.build.chargeCap += bonuses.capBonus;
+    this.build.maxSwarms += bonuses.startMotes;
+    this.build.extraBatterySlots += bonuses.startBatteries;
     this.level = 1;
     this.xp = 0;
     this.pendingLevels = 0;
@@ -328,6 +369,9 @@ export class GameScene extends Phaser.Scene {
     clearHold(this.charge);
     setCap(this.charge, this.build.chargeCap);
     this.charge.amount = TUNING.charge.start;
+    // Добавка меты идёт через add: она клампится свободным Током, а прямой
+    // записи в amount потолок не указ — пул оказался бы выше шкалы.
+    add(this.charge, bonuses.startCharge);
     this.supply = supplyAt(this.mode, this.level);
     this.pickups.items.length = 0;
     this.pickups.spawnTimerMs = 0;
@@ -346,9 +390,8 @@ export class GameScene extends Phaser.Scene {
     // сетка зависит от размера поля, а тот меняется при повороте экрана.
     this.grid = this.add.graphics().setDepth(-1);
 
-    this.player = this.add
-      .circle(this.pos.x, this.pos.y, TUNING.player.radius, PLAYER_ALIVE_COLOR)
-      .setDepth(10);
+    this.player = this.add.image(this.pos.x, this.pos.y, ART.player.key).setDepth(10);
+    this.player.setScale(artScale(ART.player, this.player.height));
 
     this.controls = new InputHub(this);
     this.shots = new Projectiles(this);
@@ -365,11 +408,7 @@ export class GameScene extends Phaser.Scene {
     this.pickupArcs = [];
     for (let i = 0; i < TUNING.pickups.poolSize; i++) {
       this.pickupArcs.push(
-        this.add
-          .circle(0, 0, TUNING.pickups.batteryRadius, BATTERY_COLOR)
-          .setStrokeStyle(1, BATTERY_STROKE)
-          .setDepth(7)
-          .setVisible(false),
+        this.add.image(0, 0, ART.battery.key).setDepth(7).setVisible(false),
       );
     }
 
@@ -709,6 +748,12 @@ export class GameScene extends Phaser.Scene {
     // обновляем ссылку, потому что create() создаёт позицию заново.
     if (this.allyContext.player) this.allyContext.player.pos = this.pos;
     this.allyContext.enemies = this.enemies;
+    // Общая цель роя считается ЗДЕСЬ один раз на шаг, а не каждым мотом
+    // отдельно: выбор требует перебора врагов, а мотов в стае до шести, и
+    // шесть переборов на шаг — это и лишние 6×N сравнений, и размазанный урон
+    // (каждый мот брал «своего ближнего»). Правила выбора — в systems/targeting.
+    const chaseRange = TUNING.ally.moteChaseRangeFactor * VIEW.minSide;
+    this.allyContext.swarmFocus = pickFocusTarget(this.enemies, this.pos, chaseRange * chaseRange);
     // Крылья держатся по бокам от направления взгляда и работают только пока
     // игрок играет: движение и дэш — это и есть участие, стояние — нет.
     this.idleMs = inputLen > 0.001 || this.dashT > 0 ? 0 : this.idleMs + ms;
@@ -1018,7 +1063,10 @@ export class GameScene extends Phaser.Scene {
       if (index >= 0) this.enemies.splice(index, 1);
       this.killed++;
       noteKill(this.stats);
-      this.gainXp(TUNING.progression.xpPerKill);
+      // Опыт — за ЦЕНУ цели, а не за факт убийства: иначе правильная работа
+      // выводка (добить танка) наказывалась медленной прогрессией, а разгром
+      // мелочи — быстрой (см. xpForKill в core/progression).
+      this.gainXp(xpForKill(e.kind.id, e.elite !== null));
       this.splitEnemy(e);
       this.blastVolatile(e);
     }
@@ -1369,16 +1417,16 @@ export class GameScene extends Phaser.Scene {
     }
     if (!at) return;
     // Кто именно появится — решает режиссёр спавна: он держит кольцо, потолок
-    // не-погонял и взвешенный выбор среди видов, которые уже открыты уровнем.
-    // До этого вида он был написан и протестирован, но сцена его не звала вовсе
-    // — в игре существовал ровно один враг при четырёх описанных.
-    let nonChasers = 0;
-    for (const e of this.enemies) if (!e.usesRing) nonChasers++;
+    // не-погонял, потолки отдельных видов и взвешенный выбор среди видов, которые
+    // уже открыты уровнем. Состав считается по факту, а не поддержкой счётчиков:
+    // расхождение счётчика и массива врагов и есть та ошибка, из-за которой на
+    // поле оказывалось три танка.
+    const counts: KindCounts = {};
+    for (const e of this.enemies) counts[e.kind.id] = (counts[e.kind.id] ?? 0) + 1;
     const pick = pickSpawn(
       this.level,
       eliteChanceAt(this.mode, this.stats.timeMs),
-      this.enemies.length,
-      nonChasers,
+      counts,
       this.rng,
     );
     const elite = eliteNumbers(pick.elite);
@@ -1425,7 +1473,7 @@ export class GameScene extends Phaser.Scene {
     this.sfx.play('death');
     this.juice.shake('death');
     this.juice.flash(140, 255, 60, 90);
-    this.player.setFillStyle(PLAYER_DEAD_COLOR);
+    this.player.setTint(PLAYER_DEAD_COLOR);
     this.deathText = this.add
       .text(VIEW.w / 2, VIEW.h * 0.15, isTouchDevice() ? 'DEAD\nкоснись экрана' : 'DEAD\nR — новый забег', {
         fontFamily: 'monospace',
@@ -1440,9 +1488,34 @@ export class GameScene extends Phaser.Scene {
     // опыта из него не вынести. Строка отчёта копируется целиком — её и присылают.
     const head = this.statsHead();
     this.report = reportLine(this.stats, head);
-    this.summary = formatStats(this.stats, head).map((line) =>
+    // Медаль выдаётся по факту завершённого забега и сразу сохраняется: экран
+    // смерти — единственное место, где забег уже закончился и мир остановлен.
+    // Если запись не удалась, забег всё равно продолжается — память не стоит
+    // сломанной игры.
+    this.freshMedals = unlockNew(this.meta, {
+      timeMs: this.stats.timeMs,
+      kills: this.stats.kills,
+      level: this.level,
+      specialty: this.build.specialty,
+      batteries: this.stats.batteries,
+    });
+    if (this.freshMedals.length > 0) saveText(META_KEY, serializeMeta(this.meta));
+    // Медали идут отдельным цветом: это не телеметрия забега, а его результат, и
+    // цвет отличает результат от отчёта без чтения строк.
+    const medalLines = new Set(
+      this.freshMedals.map((a) => `ОТКРЫТО: ${a.title} (${a.goal}) — ${a.reward}`),
+    );
+    const goal = nextGoal(this.meta);
+    this.summary = [
+      ...formatStats(this.stats, head),
+      ...medalLines,
+      metaProgress(this.meta) + (goal ? ` · цель: ${goal}` : ' · все открыты'),
+    ].map((line) =>
       this.add
-        .text(0, 0, line, { fontFamily: 'monospace', color: '#a9a3c9' })
+        .text(0, 0, line, {
+          fontFamily: 'monospace',
+          color: medalLines.has(line) ? '#ffe066' : '#a9a3c9',
+        })
         .setOrigin(0.5, 0)
         .setDepth(30),
     );
@@ -1515,7 +1588,10 @@ export class GameScene extends Phaser.Scene {
     this.player.setPosition(this.pos.x, this.pos.y);
     // Цвет «живого» игрока не должен затирать вид мёртвого.
     if (!this.dead) {
-      this.player.setFillStyle(this.iFramesT > 0 ? PLAYER_IFRAMES_COLOR : PLAYER_ALIVE_COLOR);
+      // Неуязвимость — это ТИНТ спрайта, а не своя заливка: спрайт один на все
+      // состояния, и подмена заливки стирала бы его целиком.
+      if (this.iFramesT > 0) this.player.setTint(PLAYER_IFRAMES_COLOR);
+      else this.player.clearTint();
       this.player.setAlpha(this.dashT > 0 ? 0.85 : 1);
     }
 
@@ -1533,12 +1609,13 @@ export class GameScene extends Phaser.Scene {
         continue;
       }
       const drop = item.kind === 'drop';
-      arc
-        .setVisible(true)
-        .setPosition(item.x, item.y)
-        .setRadius(item.radius)
-        .setFillStyle(drop ? DROP_COLOR : BATTERY_COLOR)
-        .setStrokeStyle(1, drop ? DROP_STROKE : BATTERY_STROKE);
+      const art = drop ? ART.drop : ART.battery;
+      arc.setVisible(true).setPosition(item.x, item.y).setTexture(art.key);
+      // Размер — от вида предмета: осколок мельче батареи, и путать их нельзя,
+      // потому что берут их по разным причинам. Масштаб — общим правилом арта,
+      // а не setDisplaySize: квадрат из неквадратной текстуры искажал пропорции
+      // и ломал целый делитель.
+      arc.setScale(artScale(art, arc.height));
       // Предмет тускнеет к концу срока: игрок видит, что брать надо сейчас.
       arc.setAlpha(item.ageMs > item.ttlMs * 0.7 ? 0.45 : 1);
     }

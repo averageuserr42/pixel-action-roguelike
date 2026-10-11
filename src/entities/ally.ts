@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { ART, artScale } from '../config/art';
 import { TUNING } from '../config/tuning';
 import { clampToBounds, type Vec2 } from '../core/math';
 import { VIEW } from '../core/viewport';
@@ -84,6 +85,14 @@ export interface AllyContext extends HitTargets {
   spiritPierce: number;
   /** Крос МЕХАНИК×СУММОНЕР. */
   moteFastRechase: boolean;
+  /**
+   * Общая цель роя на этот шаг. Её считает сцена один раз на шаг
+   * (`pickFocusTarget`), а не каждый мот сам за себя: шесть мотов с шестью
+   * «ближайшими» размазывали урон по толпе, и крупная цель стояла дольше, чем
+   * игрок терпел (ощущение «суммонер проседает по урону»). Ссылка на живого
+   * врага из массива сцены — без копий и аллокаций.
+   */
+  swarmFocus: Enemy | null;
 }
 
 /**
@@ -98,7 +107,7 @@ export class Ally {
   readonly kind: AllyKind;
   readonly pos: Vec2;
 
-  private readonly arc: Phaser.GameObjects.Arc;
+  private readonly sprite: Phaser.GameObjects.Image;
   /** Сторона строя: +1 — правое крыло, -1 — левое. */
   private readonly slotSide: number;
   /** Ранг в крыле: 0 — ближний к игроку, 1 — дальний. */
@@ -112,7 +121,6 @@ export class Ally {
   private rearmMs = 0;
   /** Игрок встал — крыло сейчас не работает. Отдельно от перезарядки: причины видны по разному. */
   private idle = false;
-  private target: Enemy | null = null;
 
   constructor(scene: Phaser.Scene, kind: AllyKind, slot: number, at: Vec2) {
     this.kind = kind;
@@ -122,9 +130,12 @@ export class Ally {
     this.angle = slot * TUNING.ally.orbitSlotAngleRad;
     this.rearmMs = 0;
 
-    this.arc = scene.add.circle(at.x, at.y, this.radius, ALLY_COLOR[kind]).setDepth(11);
-    // Кольцо отличает устройства от врагов даже боковым зрением.
-    if (kind === 'turret') this.arc.setStrokeStyle(1, 0x2f6f4f);
+    const art = ART[kind];
+    this.sprite = scene.add.image(at.x, at.y, art.key).setDepth(11);
+    this.sprite.setScale(artScale(art, this.sprite.height));
+    // Ролевой тинт отличает своих от врагов даже боковым зрением: враги краснеют
+    // и синеют по фазе, свои всегда в своём цвете.
+    this.sprite.setTint(ALLY_COLOR[kind]);
   }
 
   get radius(): number {
@@ -165,13 +176,13 @@ export class Ally {
   }
 
   render(): void {
-    this.arc.setPosition(this.pos.x, this.pos.y);
+    this.sprite.setPosition(this.pos.x, this.pos.y);
     // Тусклый спутник — тот, что сейчас не работает: перезарядка или игрок встал.
-    this.arc.setAlpha(this.rearmMs > 0 || this.idle ? 0.3 : 1);
+    this.sprite.setAlpha(this.rearmMs > 0 || this.idle ? 0.35 : 1);
   }
 
   destroy(): void {
-    this.arc.destroy();
+    this.sprite.destroy();
   }
 
   /** Турель стоит на месте и сама выбирает цель в своём радиусе. */
@@ -231,44 +242,36 @@ export class Ally {
         return;
       }
     }
-  }
-
-  /**
-   * Мот стаи: сам летит к врагу и жалит. Цель потеряна — возвращается на
-   * орбиту и ждёт переформирования, поэтому стая не «тратится» навсегда.
+  }  /**
+   * Мот стаи: летит к ОБЩЕЙ цели выводка и жалит её. Цели нет — возвращается
+   * в крыло и ждёт переформирования, поэтому стая не «тратится» навсегда.
+   *
+   * Цель приходит готовой (`ctx.swarmFocus`) и переиспользуется всеми мотами:
+   * раньше каждый искал ближнего сам (`nearestEnemy`), и урон падал по
+   * разным врагам — вид «суммонер проседает по урону» был именно этим
+   * (замер: суммарный урон стаи нормальный, он просто не добивал). Попутно
+   * ушёл перебор `ctx.enemies.includes` на каждого мота на каждом шаге:
+   * общая цель живёт ровно столько, сколько жив сам враг, и проверять её
+   * заново не от чего.
    */
   private stepMote(dt: number, ctx: AllyContext): void {
-    if (
-      this.rearmMs > 0 ||
-      this.idle ||
-      !this.target ||
-      // Труп остаётся в списке до resolveKills: без этой проверки мот летел бы
-      // к уже убитому врагу и жалил пустоту вместо живого.
-      this.target.hp <= 0 ||
-      !ctx.enemies.includes(this.target)
-    ) {
-      // Цель потеряна — ищем новую сами и возвращаемся в своё крыло. Без этого
-      // мот после первого врага кружил бы рядом до конца забега без дела.
-      const candidate = this.idle
-        ? null
-        : this.nearestEnemy(ctx, TUNING.ally.moteChaseRangeFactor * VIEW.minSide);
-      this.target = candidate;
+    const focus = ctx.swarmFocus;
+    if (this.rearmMs > 0 || this.idle || !focus || focus.hp <= 0) {
       this.followSlot(dt, ctx);
       return;
     }
 
-    const dx = this.target.pos.x - this.pos.x;
-    const dy = this.target.pos.y - this.pos.y;
+    const dx = focus.pos.x - this.pos.x;
+    const dy = focus.pos.y - this.pos.y;
     const dist = Math.hypot(dx, dy) || 1;
-    const reach = this.radius + this.target.radius;
+    const reach = this.radius + focus.radius;
 
     if (dist <= reach) {
-      ctx.damage(this.target, TUNING.ally.moteDamage);
-      // Крос МЕХАНИК×СУММОНЕР: рой не расходится на переформирование — мот той
-      // же секундой ищет следующего. Без кроса — прежняя пауза на восстановление.
-      this.target = ctx.moteFastRechase
-        ? this.nearestEnemy(ctx, TUNING.ally.moteChaseRangeFactor * VIEW.minSide)
-        : null;
+      ctx.damage(focus, TUNING.ally.moteDamage);
+      // Крос МЕХАНИК×СУММОНЕР: мот не уходит на переформирование и жалит снова
+      // той же секундой. Без кроса — прежняя пауза на восстановление. С общей
+      // целью карта читается ещё честнее: она была про скорость повторных
+      // укусов, а не про смену цели.
       this.rearmMs = ctx.moteFastRechase ? 0 : TUNING.ally.moteRearmMs;
       return;
     }

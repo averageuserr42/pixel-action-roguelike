@@ -12,6 +12,8 @@ const PREFIX = 'par.';
 export const HISTORY_KEY = 'history.v1';
 /** Ключ «игрок уже видел подсказки первого забега». */
 export const INTRO_KEY = 'intro.v1';
+/** Ключ открытых достижений. Мета — единственное, что переживает забег. */
+export const META_KEY = 'meta.v1';
 
 export function loadText(key: string): string | null {
   try {

@@ -5,6 +5,13 @@ import { VIEW } from '../core/viewport';
 import type { Enemy } from '../entities/enemy';
 
 const PROJECTILE_COLOR = 0xfff3b0;
+/**
+ * Враждебный выстрел другого цвета И размера. Ощущение игрока: «снаряд стрелка не
+ * отличим, того же цвета» — общий цвет делал угрозу неотличимой от своих же пуль,
+ * а по цвету решается, куда уклоняться.
+ */
+const HOSTILE_COLOR = 0xff6b6b;
+const HOSTILE_RADIUS = 3;
 
 /**
  * Параметры выстрела. У каждого снаряда они свои: выстрелы турели и духа
@@ -108,6 +115,9 @@ export class Projectiles {
     free.vel.x = dir.x * spec.speed;
     free.vel.y = dir.y * spec.speed;
     free.arc.setPosition(free.pos.x, free.pos.y).setVisible(true);
+    // Свой выстрел — мелкий и бледный, враждебный — крупнее и красный.
+    free.arc.setRadius(free.hostile ? HOSTILE_RADIUS : TUNING.shots.projectileRadius);
+    free.arc.setFillStyle(free.hostile ? HOSTILE_COLOR : PROJECTILE_COLOR);
   }
 
   /**
