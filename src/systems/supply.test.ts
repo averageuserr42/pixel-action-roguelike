@@ -4,17 +4,18 @@ import { batteryIncomePerSec, supplyAt } from './supply';
 
 test('на первом уровне числа равны базовым из строки режима', () => {
   const s = supplyAt('normal', 1);
-  assert.equal(s.batteryValue, 6);
+  assert.equal(s.batteryValue, 7);
   assert.equal(s.spawnIntervalMs, 2400);
   assert.equal(s.onField, 2);
-  assert.equal(batteryIncomePerSec(s), 2.5);
+  // База 7 на паузе 2.4 с: 2.92 Ток/с — поднято с 2.5 по забегу №9.
+  assert.equal(batteryIncomePerSec(s), 7 / 2.4);
 });
 
 test('батарея дорожает ступенями, а не каждый уровень', () => {
-  assert.equal(supplyAt('normal', 3).batteryValue, 6, 'третий уровень ещё база');
-  assert.equal(supplyAt('normal', 4).batteryValue, 7, 'на четвёртом батарея дороже');
-  assert.equal(supplyAt('normal', 6).batteryValue, 7, 'внутри ступени цена не растёт');
-  assert.equal(supplyAt('normal', 7).batteryValue, 8);
+  assert.equal(supplyAt('normal', 3).batteryValue, 7, 'третий уровень ещё база');
+  assert.equal(supplyAt('normal', 4).batteryValue, 8, 'на четвёртом батарея дороже');
+  assert.equal(supplyAt('normal', 6).batteryValue, 8, 'внутри ступени цена не растёт');
+  assert.equal(supplyAt('normal', 7).batteryValue, 9);
 });
 
 test('пауза между батареями сокращается и не уходит ниже предела', () => {
@@ -30,14 +31,14 @@ test('мест на поле становится больше: это запа�
 });
 
 test('осколок с убитого дорожает вместе с врагом', () => {
-  assert.equal(supplyAt('normal', 1).dropValue, 2);
-  assert.equal(supplyAt('normal', 4).dropValue, 3);
-  assert.equal(supplyAt('normal', 7).dropValue, 4);
+  assert.equal(supplyAt('normal', 1).dropValue, 3);
+  assert.equal(supplyAt('normal', 4).dropValue, 4);
+  assert.equal(supplyAt('normal', 7).dropValue, 5);
 });
 
 test('доход от батарей растёт монотонно: расход обгонял его при фиксированных числах', () => {
   let previous = batteryIncomePerSec(supplyAt('normal', 1));
-  assert.equal(previous, 2.5);
+  assert.equal(previous, 7 / 2.4);
   for (let level = 2; level <= 20; level++) {
     const income = batteryIncomePerSec(supplyAt('normal', level));
     assert.ok(income >= previous, `уровень ${level}: доход упал с ${previous} до ${income}`);

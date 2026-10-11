@@ -19,5 +19,7 @@
     "verbatimModuleSyntax": true,
     "noEmit": true
   },
-  "include": ["src"]
+  // tools — стенд замеров: он живёт в репозитории и обязан проверяться теми же
+  // правилами, что игра. На сборку это не влияет: vite собирает только src.
+  "include": ["src", "tools"]
 }

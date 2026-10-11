@@ -1007,6 +1007,10 @@ export class GameScene extends Phaser.Scene {
 
     this.choosing = true;
     this.controls.setEnabled(false);
+    // Мир встаёт вместе с врагами: их замах и рывок замирают на полуслове, и без
+    // отбоя удар приходил бы в первый же кадр после подбора карты — то есть
+    // ровно тогда, когда игрок ещё читает панель, а не поле.
+    for (const enemy of this.enemies) enemy.standDown(TUNING.enemy.standDownMs);
     this.picker.show(cards, title, (card) => this.pick(card));
   }
 
@@ -1028,6 +1032,10 @@ export class GameScene extends Phaser.Scene {
     this.picker.hide();
     this.choosing = false;
     this.controls.setEnabled(true);
+    // Передышка на выходе из паузы: решение только что принято, а мир шагает
+    // сразу. Окно шире кд дэша, поэтому рывок в нём гарантированно доступен —
+    // это время на то, чтобы увидеть поле и уйти, а не на то, чтобы постоять.
+    this.iFramesT = Math.max(this.iFramesT, TUNING.player.resumeGraceMs);
     this.writeRecord();
     this.updateHud();
 
