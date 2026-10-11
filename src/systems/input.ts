@@ -12,10 +12,6 @@ import { cssToLogical, VIEW } from '../core/viewport';
 export interface InputState {
   /** Вектор движения: единичной длины у клавиатуры, аналоговый (0..1) у стика. */
   move: Vec2;
-  /** Точка в мире, куда целится ручной режим. */
-  aim: Vec2;
-  /** Огонь удерживается (актуально для ручного режима). */
-  firing: boolean;
   /** Ввод идёт с сенсорного экрана. */
   touchActive: boolean;
 }
@@ -23,13 +19,10 @@ export interface InputState {
 export class InputHub {
   readonly state: InputState = {
     move: { x: 0, y: 0 },
-    aim: { x: 0, y: 0 },
-    firing: false,
     touchActive: false,
   };
 
   private dashQueued = false;
-  private toggleFireQueued = false;
   private stickPointerId: number | null = null;
   private readonly stickOrigin: Vec2 = { x: 0, y: 0 };
   /** Пока открыт модальный экран (выбор таланта), ввод в мир не идёт. */
@@ -59,17 +52,12 @@ export class InputHub {
     this.cursors = kb.createCursorKeys();
 
     const dashKey = kb.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
-    const fireModeKey = kb.addKey(Phaser.Input.Keyboard.KeyCodes.F);
 
     // Ввод событийный, а не опросом JustDown: если down и up приходят в один тик
     // (очень быстрое нажатие или просевший кадр), опрос молча терял нажатие.
     dashKey.off('down');
     dashKey.on('down', () => {
       this.dashQueued = true;
-    });
-    fireModeKey.off('down');
-    fireModeKey.on('down', () => {
-      this.toggleFireQueued = true;
     });
 
     // Нужен мультитач: стик и кнопка дэша должны работать одновременно.
@@ -103,7 +91,6 @@ export class InputHub {
     this.stickPointerId = null;
     this.state.move.x = 0;
     this.state.move.y = 0;
-    this.state.firing = false;
     this.base.setVisible(false);
     this.knob.setVisible(false);
   }
@@ -132,13 +119,6 @@ export class InputHub {
   takeDash(): boolean {
     const queued = this.dashQueued;
     this.dashQueued = false;
-    return queued;
-  }
-
-  /** Запрос на смену режима огня (клавиша F). */
-  takeToggleFire(): boolean {
-    const queued = this.toggleFireQueued;
-    this.toggleFireQueued = false;
     return queued;
   }
 
@@ -201,12 +181,7 @@ export class InputHub {
       }
 
       if (this.withinDashButton(pointer.x, pointer.y)) this.dashQueued = true;
-      return;
     }
-
-    this.state.aim.x = pointer.x;
-    this.state.aim.y = pointer.y;
-    this.state.firing = true;
   };
 
   private readonly onMove = (pointer: Phaser.Input.Pointer): void => {
@@ -237,11 +212,7 @@ export class InputHub {
         this.stickOrigin.x + unitX * reach,
         this.stickOrigin.y + unitY * reach,
       );
-      return;
     }
-
-    this.state.aim.x = pointer.x;
-    this.state.aim.y = pointer.y;
   };
 
   private readonly onUp = (pointer: Phaser.Input.Pointer): void => {
@@ -254,6 +225,5 @@ export class InputHub {
       this.base.setVisible(false);
       this.knob.setVisible(false);
     }
-    if (!this.isTouchPointer(pointer)) this.state.firing = false;
   };
 }

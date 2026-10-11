@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { TUNING } from '../config/tuning';
+import { createIntro, introMuted, muteIntro, nextHint, type IntroState } from '../core/intro';
 import { approach, clampToBounds, distance, type Vec2 } from '../core/math';
 import {
   applyCard,
@@ -13,26 +14,82 @@ import {
 } from '../core/progression';
 import { mulberry32, randomSeed, type Rng } from '../core/rng';
 import {
+  appendResult,
+  bestOf,
+  formatResultLine,
+  parseHistory,
+  serializeHistory,
+  type RunResult,
+} from '../core/runHistory';
+import {
   createRunRecord,
-  type FireMode,
   type RunMode,
   type RunRecord,
   type RunProfile,
 } from '../core/runRecord';
+import {
+  createRunStats,
+  formatClock,
+  formatStats,
+  noteBattery,
+  noteDrop,
+  noteKill,
+  noteRefusal,
+  noteSpend,
+  reportLine,
+  stepStats,
+  type RunStats,
+  type StatsHead,
+} from '../core/runStats';
+import { copyText, HISTORY_KEY, INTRO_KEY, loadText, saveText } from '../core/store';
 import { isTouchDevice, VIEW } from '../core/viewport';
 import { Ally, isWingKind, type AllyContext, type AllyKind } from '../entities/ally';
 import { Enemy, enemyTargetCount } from '../entities/enemy';
 import { FixedStep } from '../sim/fixedStep';
+import { add, chargeNorm, createCharge, setCap, stepCharge, type Charge } from '../systems/charge';
+import {
+  addPickup,
+  collect,
+  createPickupField,
+  createTally,
+  spawnPoint,
+  stepAge,
+  takeSpawn,
+  type PickupField,
+  type PickupSpec,
+  type PickupTally,
+} from '../systems/pickups';
+import { supplyAt, type Supply } from '../systems/supply';
 import { InputHub } from '../systems/input';
 import { Projectiles } from '../systems/projectiles';
-import { Weapon, type WeaponMods } from '../systems/weapon';
+import { Sfx, type AudioContextLike } from '../systems/sfx';
 import { CardPicker } from '../ui/cards';
+import { Juice } from '../ui/juice';
 
 const PLAYER_ALIVE_COLOR = 0xffe066;
 const PLAYER_IFRAMES_COLOR = 0xffffff;
 const PLAYER_DEAD_COLOR = 0x3a3550;
+const BATTERY_COLOR = 0xffd23f;
+const BATTERY_STROKE = 0x8a6f00;
+/**
+ * Осколок цвета чистой энергии: он обязан отличаться и от батареи (жёлтой), и
+ * от врагов (у тех свои цвета состояний), и от спутников. Светло-голубой не
+ * занят никем, а сам вид мельче и тускнеет быстрее — осколок видно как вспышку,
+ * а не как забытую батарею.
+ */
+const DROP_COLOR = 0xeaf6ff;
+const DROP_STROKE = 0x5c7fa3;
+/** Кольца событий: попадание белое, смерть врага — цветом угрозы, тёплым. */
+const HIT_RING_COLOR = 0xffffff;
+const KILL_RING_COLOR = 0xff9f1c;
 /** Как режимы называются игроку. Числа живут в tuning, названия — только здесь. */
 const MODE_TITLE: Record<RunMode, string> = { normal: 'ОБЫЧНЫЙ', hardcore: 'ХАРДКОР' };
+
+/** Шкала Тока для HUD: десять делений, полные и пустые. */
+function chargeBar(c: Charge): string {
+  const filled = Math.round(chargeNorm(c) * 10);
+  return `[${'■'.repeat(filled)}${'□'.repeat(10 - filled)}]`;
+}
 
 export class GameScene extends Phaser.Scene {
   private sim!: FixedStep;
@@ -44,8 +101,20 @@ export class GameScene extends Phaser.Scene {
    */
   runRecord!: RunRecord;
 
+  /** Телеметрия забега: счётчики, из которых собирается отчёт. */
+  private stats: RunStats = createRunStats();
+  /** Подсказки первого забега. Показываются один раз на игрока. */
+  private intro: IntroState = createIntro();
+  /** История прошлых забегов: с чем сравнивать текущий. */
+  private history: RunResult[] = [];
+  /** Строки итога на экране смерти: их переставляет поворот экрана. */
+  private summary: Phaser.GameObjects.Text[] = [];
+  private bestLabel?: Phaser.GameObjects.Text;
+  private copyLabel?: Phaser.GameObjects.Text;
+  /** Строка отчёта одной строкой — то, что копирует кнопка на экране смерти. */
+  private report = '';
+
   private controls!: InputHub;
-  private weapon!: Weapon;
   private grid!: Phaser.GameObjects.Graphics;
   private player!: Phaser.GameObjects.Arc;
   private deathText?: Phaser.GameObjects.Text;
@@ -78,12 +147,23 @@ export class GameScene extends Phaser.Scene {
   private shots!: Projectiles;
   private allies: Ally[] = [];
   private picker!: CardPicker;
+  /** Сочность: кольца, подписи, следы и тряска. Отдельный слой от логики боя. */
+  private juice!: Juice;
+  /** Звук: синтез осциллятором, поэтому файлов в проекте нет. */
+  private sfx!: Sfx;
+  /**
+   * Звуковой контекст. Создаётся лениво и один раз: браузер не даёт играть до
+   * первого жеста, поэтому до него создавать просто нечего.
+   */
+  private audio: AudioContextLike | null = null;
   /** Миллисекунд без движения и дэша: после паузы крылья гаснут. */
   private idleMs = 0;
   /** Правило про гаснущее крыло показывается один раз за забег: иначе оно невидимо. */
   private wingsToldAbout = false;
   /** Слоты строя. Общие для духов и мотов: делить их по видам — значит ставить мот в крыло духа. */
   private wingSlots = 0;
+  /** Первый отказ фигур из-за пустого пула: тост показывается один раз за забег. */
+  private dryTold = false;
 
   /** Собранный за забег билд: и цифры, и порядок выбора для записи. */
   private build: BuildState = createBuild();
@@ -97,13 +177,26 @@ export class GameScene extends Phaser.Scene {
 
   /** Враги, погибшие в этом шаге. Убираются и считаются один раз, после всех. */
   private readonly pendingKills: Enemy[] = [];
-  private readonly weaponMods: WeaponMods = {
-    fireIntervalMult: 1,
-    damage: 0,
-    pierce: 0,
-    explosiveRadiusFactor: 0,
-    targetRangeFactor: TUNING.weapon.targetRangeFactor,
-  };
+  /**
+   * Ток фигур: единственный ресурс забега. Добывается подбором батарей с поля,
+   * поэтому фигуры работают ровно настолько, насколько игрок успевает двигаться.
+   */
+  private readonly charge: Charge = createCharge(TUNING.charge.capBase);
+  /**
+   * Снабжение текущего уровня: сколько даёт батарея, как часто она появляется,
+   * сколько мест на поле и сколько стоит осколок с убитого. Пересчитывается на
+   * каждом новом уровне: расход растёт с каждой фигурой и с каждым уровнем
+   * врага, и фиксированный доход обгонялся бы им — забег упирался бы в голод,
+   * а игрок обязан был бы вкладывать все уровни только в энергию.
+   */
+  private supply: Supply = supplyAt('normal', 1);
+  /** Предметы Тока на поле: батареи и осколки. Правила — в systems/pickups. */
+  private readonly pickups: PickupField = createPickupField();
+  /** Круги под предметы. Пул, чтобы в игровом шаге не было аллокаций. */
+  private pickupArcs: Phaser.GameObjects.Arc[] = [];
+  /** Что собрал этот шаг. Переиспользуется: подбор идёт каждые 8 мс. */
+  private readonly tally: PickupTally = createTally();
+
   /** Переиспользуемый контекст спутников: в игровом шаге нет аллокаций. */
   private readonly allyContext: AllyContext = {
     playerPos: { x: 0, y: 0 },
@@ -112,12 +205,14 @@ export class GameScene extends Phaser.Scene {
     enemies: [],
     shots: null as unknown as Projectiles,
     damage: (enemy, amount) => this.damage(enemy, amount),
+    charge: this.charge,
+    onDry: () => this.reportDry(),
+    onSpend: (cost) => noteSpend(this.stats, cost),
     turretRateMult: 1,
     spiritRateMult: 1,
-    playerPierce: 0,
-    playerExplosiveRadius: 0,
-    turretRounds: false,
-    spiritRounds: false,
+    costMult: 1,
+    turretPierce: 0,
+    spiritPierce: 0,
     moteFastRechase: false,
   };
 
@@ -126,7 +221,6 @@ export class GameScene extends Phaser.Scene {
     seed: 1,
     mode: 'normal',
     control: 'keyboard',
-    fireModeAtStart: 'manual',
     changedDuringRun: false,
   };
 
@@ -141,7 +235,6 @@ export class GameScene extends Phaser.Scene {
   private iFramesT = 0;
   private dashBufferT = 0;
   private restartRequested = false;
-  private fireMode: FireMode = 'manual';
   private dead = false;
   /** false, пока забег не начался: до первого действия профиль помощи ещё уточняется. */
   private profileLocked = false;
@@ -174,7 +267,6 @@ export class GameScene extends Phaser.Scene {
     this.orbitT = 0;
     this.killed = 0;
     this.modeLabels = [];
-    this.fireMode = 'manual';
     this.profileLocked = false;
     this.deathText = undefined;
     this.toast = undefined;
@@ -182,6 +274,10 @@ export class GameScene extends Phaser.Scene {
     this.hudSignature = '';
 
     this.build = createBuild();
+    // Стартовая стая — часть билда, а не отдельный подарок: карта «Стая» потом
+    // добирает мотов до предела, и без этого учёта первая карта не дала бы
+    // ничего.
+    this.build.maxSwarms = TUNING.progression.startSwarms;
     this.level = 1;
     this.xp = 0;
     this.pendingLevels = 0;
@@ -192,7 +288,22 @@ export class GameScene extends Phaser.Scene {
     this.allyContext.playerActive = true;
     this.wingSlots = 0;
     this.wingsToldAbout = false;
+    this.dryTold = false;
+    setCap(this.charge, this.build.chargeCap);
+    this.charge.amount = TUNING.charge.start;
+    this.supply = supplyAt(this.mode, this.level);
+    this.pickups.items.length = 0;
+    this.pickups.spawnTimerMs = 0;
     this.pendingKills.length = 0;
+    this.stats = createRunStats();
+    this.intro = createIntro();
+    this.summary = [];
+    this.bestLabel = undefined;
+    this.copyLabel = undefined;
+    this.report = '';
+    // История и «уже видел подсказки» живут в браузере: читаем их раз на забег.
+    this.history = parseHistory(loadText(HISTORY_KEY));
+    if (loadText(INTRO_KEY) === 'done') muteIntro(this.intro);
 
     // Фон создаём первым (он глубже всего), но рисуем его в relayout():
     // сетка зависит от размера поля, а тот меняется при повороте экрана.
@@ -203,13 +314,27 @@ export class GameScene extends Phaser.Scene {
       .setDepth(10);
 
     this.controls = new InputHub(this);
-    this.weapon = new Weapon();
     this.shots = new Projectiles(this);
     this.allyContext.shots = this.shots;
     this.picker = new CardPicker(this);
-    // Прицел по умолчанию — вправо, пока игрок не двинул мышь.
-    this.controls.state.aim.x = this.pos.x + 60;
-    this.controls.state.aim.y = this.pos.y;
+    this.juice = new Juice(this);
+    this.sfx = new Sfx({
+      audio: () => this.audioContext(),
+      now: () => performance.now(),
+    });
+    // Круги предметов создаются сразу и дальше только переезжают: в игровом шаге
+    // аллокаций быть не должно. Пул общий на батареи и осколки — это одна
+    // механика, а вид (размер и цвет) ставится при отрисовке по виду предмета.
+    this.pickupArcs = [];
+    for (let i = 0; i < TUNING.pickups.poolSize; i++) {
+      this.pickupArcs.push(
+        this.add
+          .circle(0, 0, TUNING.pickups.batteryRadius, BATTERY_COLOR)
+          .setStrokeStyle(1, BATTERY_STROKE)
+          .setDepth(7)
+          .setVisible(false),
+      );
+    }
 
     const kb = this.input.keyboard;
     if (!kb) throw new Error('Keyboard plugin недоступен');
@@ -217,6 +342,20 @@ export class GameScene extends Phaser.Scene {
     this.restartKey.off('down');
     this.restartKey.on('down', () => {
       this.restartRequested = true;
+    });
+
+    // Звук браузер отдаёт только после жеста: первое касание или клавиша его будят.
+    // Слушатели одноразовые — дальше контекст уже разбужен и просто работает.
+    const unlock = (): void => this.sfx.unlock();
+    this.input.once('pointerdown', unlock);
+    kb.once('keydown', unlock);
+
+    // Клавиша тишины: звук не должен быть навязан, а тихая игра обязана остаться игрой.
+    const muteKey = kb.addKey(Phaser.Input.Keyboard.KeyCodes.M);
+    muteKey.off('down');
+    muteKey.on('down', () => {
+      this.sfx.setMuted(!this.sfx.isMuted);
+      this.showToast(this.sfx.isMuted ? 'ЗВУК ВЫКЛЮЧЕН' : 'ЗВУК ВКЛЮЧЁН', '#8b86a8');
     });
     // Режим меняется ТОЛЬКО на экране смерти: живой игрок не должен менять
     // правила прогона на ходу, иначе его результат нельзя ставить в таблицу.
@@ -242,16 +381,22 @@ export class GameScene extends Phaser.Scene {
     const initial = enemyTargetCount(this.level, this.mode);
     for (let i = 0; i < initial; i++) this.spawnEnemy((i / initial) * Math.PI * 2);
 
+    // Стартовый набор: ствола у игрока нет, урон наносят только фигуры, поэтому
+    // без старой стаи забег не может начаться вовсе. Пара батарей рядом даёт
+    // первые секунды на подбор, а не на выживание без ответа.
+    const startMotes = TUNING.progression.startSwarms * TUNING.progression.motesPerSwarm;
+    for (let i = 0; i < startMotes; i++) this.addAlly('mote', this.pos);
+    for (let i = 0; i < 2; i++) this.spawnBattery();
+
     this.profile.seed = this.seed;
     this.profile.mode = this.mode;
     this.profile.control = this.controls.control;
-    this.profile.fireModeAtStart = this.effectiveFireMode();
     this.profile.changedDuringRun = false;
     this.writeRecord();
 
     this.hud = this.add.text(0, 0, '', { fontFamily: 'monospace' }).setDepth(20);
     this.hint = this.add
-      .text(0, 0, 'WASD — движение   SPACE — дэш   ЛКМ — огонь   F — режим огня   R — сид', {
+      .text(0, 0, 'WASD — движение   SPACE — дэш   R — сид', {
         fontFamily: 'monospace',
       })
       .setDepth(20);
@@ -267,9 +412,65 @@ export class GameScene extends Phaser.Scene {
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.scale.off(Phaser.Scale.Events.RESIZE, this.onResize);
       this.input.off('pointerdown', this.onDeathTap);
+      // Эффекты живут на объектах сцены: без этого перезапуск оставлял бы их висеть.
+      this.juice.destroy();
     });
 
     this.relayout();
+
+    // Забег начинается с выбора таланта: первое решение игрок принимает ДО
+    // первого врага, а не через полминуты боя. Мир при этом стоит — ровно так
+    // же, как на любом другом уровне (см. update).
+    this.pendingLevels = 1;
+    this.openOffer();
+  }
+
+  /**
+   * Описание батареи на текущем уровне: снабжение плюс карты «Плотная батарея».
+   * Ценность считается здесь, а не хранится в билде: база растёт с уровнем, и
+   * два независимых источника одного числа рано или поздно разошлись бы.
+   */
+  private batterySpec(): PickupSpec {
+    return {
+      kind: 'battery',
+      value: this.supply.batteryValue + this.build.batteryBonus,
+      ttlMs: TUNING.pickups.batteryTtlMs,
+      radius: TUNING.pickups.batteryRadius,
+    };
+  }
+
+  /**
+   * Осколок с убитого: урон тоже кормит выводок. Падает там, где убили, и живёт
+   * секунды — взять его значит сходить туда, где сейчас стоят враги.
+   */
+  private dropSpec(): PickupSpec {
+    return {
+      kind: 'drop',
+      value: this.supply.dropValue,
+      ttlMs: this.supply.dropTtlMs,
+      radius: TUNING.pickups.dropRadius,
+    };
+  }
+
+  /** Кладёт батарею вдали от игрока: добыча Тока — это движение. */
+  private spawnBattery(): void {
+    addPickup(
+      this.pickups,
+      spawnPoint(
+        this.rng,
+        VIEW.w,
+        VIEW.h,
+        TUNING.pickups.edgeMargin,
+        this.pos,
+        TUNING.pickups.minDistFactor * VIEW.minSide,
+      ),
+      this.batterySpec(),
+    );
+  }
+
+  /** Сколько батарей помещается на поле: снабжение уровня плюс карты «Сборка». */
+  private batteryLimit(): number {
+    return this.supply.onField + this.build.extraBatterySlots;
   }
 
   /** Раскладка всего экранного под текущее поле. Вызывается и при повороте телефона. */
@@ -289,12 +490,12 @@ export class GameScene extends Phaser.Scene {
     this.controls.applyViewport();
 
     // Экран смерти мог быть создан до поворота — держим его по центру нового поля.
-    this.deathText?.setPosition(VIEW.w / 2, VIEW.h * 0.15);
     if (this.deathText) this.layoutDeathScreen();
     this.toast?.setPosition(VIEW.w / 2, VIEW.h * 0.76);
 
     clampToBounds(this.pos, TUNING.player.radius, VIEW.w, VIEW.h);
     for (const e of this.enemies) clampToBounds(e.pos, e.radius, VIEW.w, VIEW.h);
+    for (const item of this.pickups.items) clampToBounds(item, item.radius, VIEW.w, VIEW.h);
 
     // Ширина поля изменилась — решение о переносе HUD надо принять заново.
     this.hudSignature = '';
@@ -325,6 +526,13 @@ export class GameScene extends Phaser.Scene {
     for (const label of this.modeLabels) {
       if (Phaser.Geom.Rectangle.Contains(label.getBounds(), pointer.x, pointer.y)) return;
     }
+    // Кнопка отчёта — единственное на экране смерти, что не перезапускает забег.
+    if (
+      this.copyLabel &&
+      Phaser.Geom.Rectangle.Contains(this.copyLabel.getBounds(), pointer.x, pointer.y)
+    ) {
+      return;
+    }
     this.restartRequested = true;
   };
 
@@ -335,10 +543,6 @@ export class GameScene extends Phaser.Scene {
 
     // Открыт выбор таланта: мир не шагает, пока решение не принято.
     if (this.choosing) return;
-
-    if (this.controls.takeToggleFire()) {
-      this.fireMode = this.fireMode === 'manual' ? 'auto' : 'manual';
-    }
 
     if (this.dead) {
       if (this.restartRequested) {
@@ -366,7 +570,14 @@ export class GameScene extends Phaser.Scene {
 
   /** Один шаг симуляции фиксированной длины. Здесь живёт вся игровая логика. */
   private step(dt: number): void {
+    // Мёртвый мир не шагает. Это не украшение: без проверки любой шаг после
+    // смерти заново начислял бы смерти и отчёты — история забивалась мусором.
+    if (this.dead) return;
     const ms = dt * 1000;
+
+    // Эффекты старятся до событий этого шага: тогда созданное сейчас кольцо
+    // успевает пожить полный срок, а не теряет один шаг сразу.
+    this.juice.step(dt);
 
     this.dashCdT = Math.max(0, this.dashCdT - ms);
     this.iFramesT = Math.max(0, this.iFramesT - ms);
@@ -386,7 +597,7 @@ export class GameScene extends Phaser.Scene {
 
     const mv = this.controls.state.move;
     const inputLen = Math.hypot(mv.x, mv.y);
-    this.syncProfile(inputLen > 0.001 || this.controls.state.firing || this.dashBufferT > 0);
+    this.syncProfile(inputLen > 0.001 || this.dashBufferT > 0);
 
     // Аналоговый ввод: у стика длина меньше единицы, у клавиатуры ровно единица.
     let ix = 0;
@@ -403,6 +614,8 @@ export class GameScene extends Phaser.Scene {
       this.dashBufferT = 0;
       this.dashT = TUNING.player.dashMs;
       this.iFramesT = TUNING.player.iFramesMs;
+      // Свист уходит вместе с рывком: дэш — решение, и он должен быть слышен.
+      this.sfx.play('dash');
     }
 
     if (this.dashT > 0) {
@@ -420,26 +633,31 @@ export class GameScene extends Phaser.Scene {
 
     this.assignSlots(dt);
 
-    const mode = this.effectiveFireMode();
-    const firing = mode === 'auto' ? true : this.controls.state.firing;
-
-    // Порядок боя: сначала все выстрелы, потом один проход попаданий, потом
-    // разбор погибших. Так урон игрока, турели и духа считается в одном месте.
-    this.weaponMods.fireIntervalMult = this.build.fireIntervalMult;
-    this.weaponMods.damage = this.build.damage;
-    this.weaponMods.pierce = this.build.pierce;
-    this.weaponMods.explosiveRadiusFactor = this.build.explosiveRadiusFactor;
-    this.weaponMods.targetRangeFactor = this.build.autoRangeFactor;
-    this.weapon.step(
-      dt,
-      this.pos,
-      this.controls.state.aim,
-      firing,
-      mode,
-      this.enemies,
-      this.shots,
-      this.weaponMods,
-    );
+    // Предметы: распад, появление, подбор. Ток приходит двумя путями — батареи
+    // за движение и осколки за урон, — и оба обязаны быть видны в отчёте.
+    stepAge(this.pickups, dt);
+    if (takeSpawn(this.pickups, dt, this.supply.spawnIntervalMs, this.batteryLimit())) {
+      this.spawnBattery();
+    }
+    collect(this.pickups, this.pos, TUNING.pickups.pickupRadius, this.tally);
+    const gained = this.tally.batteryTok + this.tally.dropTok;
+    if (gained > 0) {
+      add(this.charge, gained);
+      // Подбор виден, слышен и назван числом: это единственный источник Тока,
+      // и без отклика игрок узнаёт о нём только по шкале в углу.
+      this.juice.burst(
+        this.pos.x,
+        this.pos.y,
+        this.tally.batteries > 0 ? BATTERY_COLOR : DROP_COLOR,
+        'pickup',
+      );
+      this.juice.popup(this.pos.x, this.pos.y - TUNING.player.radius, `+${Math.round(gained)}`, '#ffe066');
+      this.sfx.play('pickup');
+      if (this.tally.batteries > 0) {
+        noteBattery(this.stats, this.tally.batteries, this.tally.batteryTok);
+      }
+      if (this.tally.drops > 0) noteDrop(this.stats, this.tally.drops, this.tally.dropTok);
+    }
 
     this.allyContext.playerPos = this.pos;
     this.allyContext.enemies = this.enemies;
@@ -457,15 +675,28 @@ export class GameScene extends Phaser.Scene {
 
     this.allyContext.turretRateMult = this.build.turretRateMult;
     this.allyContext.spiritRateMult = this.build.spiritRateMult;
-    // Крос-карты инженера: те же патроны, что у игрока, но у союзников.
-    this.allyContext.playerPierce = this.build.pierce;
-    this.allyContext.playerExplosiveRadius = this.build.explosiveRadiusFactor * VIEW.minSide;
-    this.allyContext.turretRounds = this.build.turretRounds;
-    this.allyContext.spiritRounds = this.build.spiritRounds;
+    // Карты энергии: цена действий и пробивание у союзников.
+    this.allyContext.costMult = this.build.costMult;
+    this.allyContext.turretPierce = this.build.turretPierce;
+    this.allyContext.spiritPierce = this.build.spiritPierce;
     this.allyContext.moteFastRechase = this.build.moteFastRechase;
     for (const ally of this.allies) ally.step(dt, this.allyContext);
 
     this.shots.step(dt, this.allyContext);
+    stepCharge(this.charge, dt, TUNING.charge.decayPerSec, this.build.decayReserve);
+    // Телеметрия читает пул ПОСЛЕ всех трат шага: иначе минимум был бы завышен.
+    stepStats(this.stats, dt, this.charge.amount, this.allies.length);
+
+    // Подсказки первого забега: по одной, и только когда экран свободен.
+    if (this.toast === undefined) {
+      const hint = nextHint(this.intro, {
+        batteries: this.stats.batteries,
+        spent: this.stats.chargeSpent,
+        dryMs: this.stats.dryMs,
+        idleMs: this.idleMs,
+      });
+      if (hint) this.showToast(hint, '#ffe066');
+    }
 
     if (this.pendingKills.length > 0) this.resolveKills();
 
@@ -665,15 +896,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
-   * Автострельба заставляется на сенсорном экране: там нет второго пальца под
-   * прицел, и без неё игра просто неиграбельна.
-   */
-  private effectiveFireMode(): FireMode {
-    return this.controls.state.touchActive ? 'auto' : this.fireMode;
-  }
-
-  /**
-   * Профиль забега: кто играет (клавиатура или тач) и с какой помощью.
+   * Профиль забега: кто играет — на клавиатуре или пальцем по экрану.
    * Один профиль на весь забег — иначе результат нельзя ставить в таблицу.
    *
    * До первого осмысленного действия профиль уточняется свободно: на телефоне
@@ -682,11 +905,9 @@ export class GameScene extends Phaser.Scene {
    */
   private syncProfile(started: boolean): void {
     const control = this.controls.control;
-    const mode = this.effectiveFireMode();
 
-    if (control !== this.profile.control || mode !== this.profile.fireModeAtStart) {
+    if (control !== this.profile.control) {
       this.profile.control = control;
-      this.profile.fireModeAtStart = mode;
       if (this.profileLocked) this.profile.changedDuringRun = true;
       this.writeRecord();
     }
@@ -698,22 +919,40 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
-   * Единственный путь смерти врага. Игрок, турель, дух, дрон и мот бьют через
-   * этот метод — поэтому опыт нельзя случайно не начислить.
+   * Единственный путь смерти врага. Турель, дух, дрон и мот бьют через этот
+   * метод — поэтому опыт нельзя случайно не начислить.
    */
   private damage(enemy: Enemy, amount: number): void {
-    if (enemy.hit(amount)) this.pendingKills.push(enemy);
+    if (enemy.hp <= 0) return;
+    if (enemy.hit(amount)) {
+      this.pendingKills.push(enemy);
+      return;
+    }
+    // Удар по живому виден и слышен. Смертельный удар сюда не доходит: у смерти
+    // свой, более крупный отклик — иначе одно событие звучало бы дважды.
+    this.juice.burst(enemy.pos.x, enemy.pos.y, HIT_RING_COLOR, 'hit');
+    this.sfx.play('hit');
   }
 
   /** Убирает погибших за шаг: со сцены, из списка, в счётчик и в опыт. */
   private resolveKills(): void {
     for (const e of this.pendingKills) {
+      // Осколок падает ТАМ, ГДЕ УБИЛИ: фигуры бьют с дистанции, поэтому взять
+      // его — значит сходить к врагам. Риск подбора и есть цена награды, а окно
+      // в пару секунд не даёт отложить это на потом.
+      addPickup(this.pickups, e.pos, this.dropSpec());
+      this.juice.burst(e.pos.x, e.pos.y, KILL_RING_COLOR, 'kill');
+      this.sfx.play('kill');
       e.destroy();
       const index = this.enemies.indexOf(e);
       if (index >= 0) this.enemies.splice(index, 1);
       this.killed++;
+      noteKill(this.stats);
       this.gainXp(TUNING.progression.xpPerKill);
     }
+    // Тряска одна на пачку убийств: удар по нескольким врагам в один шаг —
+    // это одно событие для глаза, а не три подряд.
+    if (this.pendingKills.length > 0) this.juice.shake('kill');
     this.pendingKills.length = 0;
   }
 
@@ -724,7 +963,22 @@ export class GameScene extends Phaser.Scene {
       this.xp -= need;
       this.level++;
       this.pendingLevels++;
+      // Доход растёт вместе с уровнем: расход поднимается и от новых фигур, и
+      // от жирных врагов, поэтому старые числа снабжения стали бы голодом.
+      this.supply = supplyAt(this.mode, this.level);
+      this.sfx.play('level');
       need = xpForNextLevel(this.level);
+    }
+    this.maybeRetireIntro();
+  }
+
+  /**
+   * Игрок освоил петлю: либо подсказки все показаны, либо он дошёл до третьего
+   * уровня. Иначе они всплывали бы в каждом забеге и мешали играть.
+   */
+  private maybeRetireIntro(): void {
+    if (this.level >= TUNING.progression.introRetireLevel || introMuted(this.intro)) {
+      saveText(INTRO_KEY, 'done');
     }
   }
 
@@ -760,6 +1014,9 @@ export class GameScene extends Phaser.Scene {
     const specialtyBefore = this.build.specialty;
     if (applyCard(this.build, card)) {
       this.lastPickTitle = card.title;
+      // Ёмкость могла вырасти — пул обязан узнать новый потолок сразу, а не к
+      // следующему начислению.
+      setCap(this.charge, this.build.chargeCap);
       this.spawnForCard(card);
       if (this.build.specialty !== null && this.build.specialty !== specialtyBefore) {
         this.announceSpecialty(this.build.specialty);
@@ -812,6 +1069,21 @@ export class GameScene extends Phaser.Scene {
     this.allies.push(new Ally(this, kind, slot, at));
   }
 
+  /**
+   * Звуковой контекст. Создаётся при первом обращении: до жеста пользователя
+   * браузер держит звук выключенным, и создавать заранее нечего. Ошибку
+   * создания глушим: старому браузеру без WebAudio игра обязана остаться игрой.
+   */
+  private audioContext(): AudioContextLike | null {
+    if (this.audio) return this.audio;
+    try {
+      this.audio = new AudioContext();
+    } catch {
+      this.audio = null;
+    }
+    return this.audio;
+  }
+
   private countAllies(kind: AllyKind): number {
     let n = 0;
     for (const a of this.allies) if (a.kind === kind) n++;
@@ -824,6 +1096,14 @@ export class GameScene extends Phaser.Scene {
    */
   private announceSpecialty(branch: BranchId): void {
     this.showToast(`ПРОФЕССИЯ: ${branchTitle(branch)}`, '#ffb703');
+  }
+
+  /** Первый отказ фигур из-за пустого пула: правило показывается один раз за забег. */
+  private reportDry(): void {
+    noteRefusal(this.stats);
+    if (this.dryTold) return;
+    this.dryTold = true;
+    this.showToast('ФИГУРЫ БЕЗ ПИТАНИЯ', '#8b86a8');
   }
 
   /** Разовое сообщение по центру: им живут закрепление профессии и гаснущее крыло. */
@@ -858,6 +1138,56 @@ export class GameScene extends Phaser.Scene {
       this.level,
       this.build.specialty,
     );
+  }
+
+  /** Шапка отчёта: то, чем забег опознаётся без доступа к записи прогона. */
+  private statsHead(): StatsHead {
+    return {
+      seed: this.seed,
+      modeTitle: MODE_TITLE[this.mode].toLowerCase(),
+      controlTitle: this.profile.control === 'touch' ? 'палец' : 'клавиатура',
+      level: this.level,
+      specialtyTitle: this.build.specialty ? branchTitle(this.build.specialty) : null,
+      picks: this.build.order,
+    };
+  }
+
+  /** С чем этот забег меряется: лучший из прошлых, а не «ощущение». */
+  private bestLine(): string {
+    const best = bestOf(this.history);
+    if (!best) return 'лучший: это первый забег';
+    return `лучший: ${formatResultLine(best, MODE_TITLE[best.mode].toLowerCase())}`;
+  }
+
+  /** Отчёт в буфер. Если браузер не даёт — говорим об этом, а не молчим. */
+  private copyReport(): void {
+    void copyText(this.report).then((ok) => {
+      this.showToast(
+        ok ? 'ОТЧЁТ СКОПИРОВАН' : 'НЕ УДАЛОСЬ: ОТЧЁТ НА ЭКРАНЕ',
+        ok ? '#8ef0b0' : '#ff9f1c',
+      );
+    });
+  }
+
+  /**
+   * Результат в историю. Недействительные забеги (смена управления по ходу)
+   * сохраняются как есть: их видно в списке, но лучшими они не становятся.
+   */
+  private saveResult(): void {
+    const result: RunResult = {
+      at: Date.now(),
+      seed: this.seed,
+      mode: this.mode,
+      control: this.profile.control,
+      timeMs: this.stats.timeMs,
+      level: this.level,
+      kills: this.stats.kills,
+      specialty: this.build.specialty,
+      picks: [...this.build.order],
+      valid: !this.runRecord.changedDuringRun,
+    };
+    this.history = appendResult(this.history, result);
+    saveText(HISTORY_KEY, serializeHistory(this.history));
   }
 
   private spawnEnemy(angle = this.rng() * Math.PI * 2): void {
@@ -905,7 +1235,14 @@ export class GameScene extends Phaser.Scene {
   }
 
   private die(): void {
+    // Смерть одна на забег: экран смерти и запись результата не должны
+    // выполняться повторно — ни вторым касанием в том же кадре, ни шагом после.
+    if (this.dead) return;
     this.dead = true;
+    // Смерть обязана читаться до слов: обвал тона, тряска и вспышка экрана.
+    this.sfx.play('death');
+    this.juice.shake('death');
+    this.juice.flash(140, 255, 60, 90);
     this.player.setFillStyle(PLAYER_DEAD_COLOR);
     this.deathText = this.add
       .text(VIEW.w / 2, VIEW.h * 0.15, isTouchDevice() ? 'DEAD\nкоснись экрана' : 'DEAD\nR — новый забег', {
@@ -916,6 +1253,29 @@ export class GameScene extends Phaser.Scene {
       })
       .setOrigin(0.5, 0)
       .setDepth(30);
+
+    // Итог забега и отчёт: без них забег заканчивается словом DEAD и никакого
+    // опыта из него не вынести. Строка отчёта копируется целиком — её и присылают.
+    const head = this.statsHead();
+    this.report = reportLine(this.stats, head);
+    this.summary = formatStats(this.stats, head).map((line) =>
+      this.add
+        .text(0, 0, line, { fontFamily: 'monospace', color: '#a9a3c9' })
+        .setOrigin(0.5, 0)
+        .setDepth(30),
+    );
+    this.bestLabel = this.add
+      .text(0, 0, this.bestLine(), { fontFamily: 'monospace', color: '#8b86a8' })
+      .setOrigin(0.5, 0)
+      .setDepth(30);
+    this.copyLabel = this.add
+      .text(0, 0, 'СКОПИРОВАТЬ ОТЧЁТ', { fontFamily: 'monospace', color: '#ffe066' })
+      .setOrigin(0.5, 0)
+      .setDepth(30)
+      .setInteractive({ useHandCursor: true });
+    this.copyLabel.on('pointerdown', () => this.copyReport());
+    this.saveResult();
+    this.maybeRetireIntro();
 
     // Режим выбирается здесь же: экран смерти — единственное состояние, где мир
     // уже остановлен. Тап по строке режима сразу начинает забег в нём; тап по
@@ -939,18 +1299,33 @@ export class GameScene extends Phaser.Scene {
     this.layoutDeathScreen();
   }
 
-  /** Раскладка экрана смерти: заголовок и строки выбора режима. Общая для смерти и поворота. */
+  /**
+   * Раскладка экрана смерти: итог, сравнение с лучшим забегом, кнопка отчёта и
+   * выбор режима. Общая для смерти и поворота телефона: порядок строк один.
+   */
   private layoutDeathScreen(): void {
     const death = this.deathText;
     if (!death) return;
-    death.setPosition(VIEW.w / 2, VIEW.h * 0.15);
     const small = this.fontLogical(TUNING.hud.smallFontLogical);
     const step = small + 6;
-    const firstY = VIEW.h * 0.15 + death.height + 8;
+    death.setPosition(VIEW.w / 2, VIEW.h * 0.12);
+    let y = death.y + death.height + 6;
+    for (const line of this.summary) {
+      line.setFontSize(small).setPosition(VIEW.w / 2, y);
+      y += line.height + 2;
+    }
+    if (this.bestLabel) {
+      this.bestLabel.setFontSize(small).setPosition(VIEW.w / 2, y);
+      y += this.bestLabel.height + 6;
+    }
+    if (this.copyLabel) {
+      this.copyLabel.setFontSize(small).setPosition(VIEW.w / 2, y);
+      y += this.copyLabel.height + step;
+    }
     for (let i = 0; i < this.modeLabels.length; i++) {
       const label = this.modeLabels[i];
       label.setFontSize(small);
-      label.setPosition(VIEW.w / 2, firstY + i * step);
+      label.setPosition(VIEW.w / 2, y + i * step);
     }
   }
 
@@ -965,18 +1340,41 @@ export class GameScene extends Phaser.Scene {
     for (const e of this.enemies) e.render();
     for (const ally of this.allies) ally.render();
 
+    // Предметы рисуются пулом: сколько их лежит, столько кругов и видно. Вид
+    // (размер и цвет) берётся из самого предмета: осколок обязан читаться как
+    // осколок, а не как забытая батарея.
+    for (let i = 0; i < this.pickupArcs.length; i++) {
+      const arc = this.pickupArcs[i];
+      const item = this.pickups.items[i];
+      if (!item) {
+        arc.setVisible(false);
+        continue;
+      }
+      const drop = item.kind === 'drop';
+      arc
+        .setVisible(true)
+        .setPosition(item.x, item.y)
+        .setRadius(item.radius)
+        .setFillStyle(drop ? DROP_COLOR : BATTERY_COLOR)
+        .setStrokeStyle(1, drop ? DROP_STROKE : BATTERY_STROKE);
+      // Предмет тускнеет к концу срока: игрок видит, что брать надо сейчас.
+      arc.setAlpha(item.ageMs > item.ttlMs * 0.7 ? 0.45 : 1);
+    }
+
+    // Следы рисуются после мира и до HUD: они часть боя, а не интерфейса.
+    this.juice.render(this.shots, this.pos, this.vel, this.dashT > 0);
+
     this.updateHud();
   }
 
   private updateHud(): void {
-    const mode = this.effectiveFireMode() === 'auto' ? 'авто' : 'ручной';
     const invalid = this.runRecord.changedDuringRun ? '  [рекорд: недействителен]' : '';
     // Профессия — часть опознания забега, поэтому едет в заголовок HUD: он умеет
     // переноситься на узком поле, а строка уровня — нет.
     const spec = this.build.specialty ? `  ${branchTitle(this.build.specialty)}` : '';
     // Режим — часть опознания забега: «обычный» и «хардкор» несравнимы между
     // собой, поэтому он виден в HUD, а не только в записи.
-    const head = `сид ${this.seed}  ${MODE_TITLE[this.mode].toLowerCase()}${spec}  огонь: ${mode}`;
+    const head = `сид ${this.seed}  ${MODE_TITLE[this.mode].toLowerCase()}${spec}`;
     const tail = `убито: ${this.killed}${invalid}`;
 
     // Решение о переносе принимается ТОЛЬКО по ширине однострочного варианта:
@@ -990,13 +1388,21 @@ export class GameScene extends Phaser.Scene {
     this.hud.setText(this.hudWrapped ? `${head}\n${tail}` : `${head}  ${tail}`);
 
     const picked = this.lastPickTitle ? `  взято: ${this.lastPickTitle}` : '';
+    // Шкала Тока видна всегда: это единственный ресурс забега, а не украшение
+    // одной из веток.
+    const charge = `  ток: ${chargeBar(this.charge)}`;
     this.pickLine.setText(
-      `ур. ${this.level}  опыт: ${this.xp}/${xpForNextLevel(this.level)}${picked}`,
+      `ур. ${this.level}  опыт: ${this.xp}/${xpForNextLevel(this.level)}${picked}${charge}`,
     );
 
     const dash =
       this.dashT > 0 ? 'DASH' : this.dashCdT > 0 ? `cd ${Math.ceil(this.dashCdT)}` : 'ready';
-    this.status.setText(`dash: ${dash}  i-frames: ${Math.round(this.iFramesT)}ms`);
+    // Время и лучший забег видны прямо в бою: сравнивать себя хочется не только
+    // после смерти. Отладочные i-frames убраны — в отчёте они не нужны.
+    const best = bestOf(this.history);
+    this.status.setText(
+      `dash ${dash} · время ${formatClock(this.stats.timeMs)}${best ? ` · лучший ${formatClock(best.timeMs)}` : ''}`,
+    );
 
     this.layoutHud();
   }

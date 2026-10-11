@@ -7,8 +7,8 @@ import type { Enemy } from '../entities/enemy';
 const PROJECTILE_COLOR = 0xfff3b0;
 
 /**
- * Параметры выстрела. У каждого снаряда они свои, поэтому карты инженера
- * меняют только стрельбу игрока, а выстрелы турели и духа живут по своим числам.
+ * Параметры выстрела. У каждого снаряда они свои: выстрелы турели и духа
+ * живут по своим числам, а крос-карты меняют только пробивание.
  */
 export interface ShotSpec {
   speed: number;
@@ -41,7 +41,7 @@ interface Projectile {
 }
 
 /**
- * Общий пул снарядов для всех, кто стреляет: игрока, турелей и духов.
+ * Общий пул снарядов для всех, кто стреляет: турелей и духов.
  *
  * Пул создаётся один раз и дальше только переиспользуется: аллокаций в игровом
  * цикле быть не должно, иначе сборщик мусора даст микрофризы ровно во время боя.
@@ -50,10 +50,10 @@ export class Projectiles {
   private readonly items: Projectile[] = [];
 
   constructor(scene: Phaser.Scene) {
-    for (let i = 0; i < TUNING.weapon.poolSize; i++) {
+    for (let i = 0; i < TUNING.shots.poolSize; i++) {
       this.items.push({
         arc: scene.add
-          .circle(0, 0, TUNING.weapon.projectileRadius, PROJECTILE_COLOR)
+          .circle(0, 0, TUNING.shots.projectileRadius, PROJECTILE_COLOR)
           .setVisible(false)
           .setDepth(8),
         pos: { x: 0, y: 0 },
@@ -144,6 +144,16 @@ export class Projectiles {
     }
   }
 
+  /**
+   * Обход живых снарядов для визуального слоя. Числами, а не объектом: следы
+   * рисуются каждый кадр, и аллокаций на кадр здесь быть не должно.
+   */
+  each(visit: (x: number, y: number, vx: number, vy: number) => void): void {
+    for (const p of this.items) {
+      if (p.alive) visit(p.pos.x, p.pos.y, p.vel.x, p.vel.y);
+    }
+  }
+
   reset(): void {
     for (const p of this.items) {
       p.alive = false;
@@ -158,7 +168,7 @@ export class Projectiles {
 
   /** Первый враг, в которого попал снаряд (не тот, кого он задел шагом раньше). */
   private enemyAt(p: Projectile, enemies: Enemy[]): Enemy | null {
-    const reach = TUNING.weapon.projectileRadius;
+    const reach = TUNING.shots.projectileRadius;
     for (const e of enemies) {
       if (e === p.lastHit) continue;
       // Труп живёт в списке до resolveKills: без этой проверки пробивающая пуля

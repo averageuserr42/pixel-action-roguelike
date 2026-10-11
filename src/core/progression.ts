@@ -5,7 +5,7 @@ import type { Rng } from './rng';
  * Прогрессия забега: опыт, уровни, таланты и профессия.
  *
  * Три ветки — три разных способа играть, а не три набора цифр:
- *  - ИНЖЕНЕР работает с оружием: темп, пробивание, разрывные снаряды.
+ *  - ЭНЕРГЕТИК отвечает за Ток: ёмкость, батареи, резерв и цену действий фигур.
  *  - МЕХАНИК ставит устройства, которые держат поле без него: турели и дрон-мины.
  *  - СУММОНЕР водит спутников: духи-стрелки и стаи, что ищут врага сами.
  *
@@ -23,7 +23,7 @@ import type { Rng } from './rng';
  * Модуль чистый: никакого Phaser, никакого времени. Числа берутся из tuning,
  * поэтому подбор баланса не задевает логику.
  */
-export type BranchId = 'engineer' | 'mechanic' | 'summoner';
+export type BranchId = 'energy' | 'mechanic' | 'summoner';
 
 export interface Branch {
   id: BranchId;
@@ -33,7 +33,7 @@ export interface Branch {
 }
 
 export const BRANCHES: readonly Branch[] = [
-  { id: 'engineer', title: 'ИНЖЕНЕР', color: 0x8ef0b0 },
+  { id: 'energy', title: 'ЭНЕРГЕТИК', color: 0x8ef0b0 },
   { id: 'mechanic', title: 'МЕХАНИК', color: 0x9ad1ff },
   { id: 'summoner', title: 'СУММОНЕР', color: 0xc8b6ff },
 ];
@@ -47,16 +47,23 @@ export function branchTitle(id: BranchId): string {
 
 /** Что карта делает с забегом. Здесь только смысл — все числа в tuning. */
 export interface CardEffects {
-  /** Множитель интервала между выстрелами игрока (меньше — чаще). */
-  fireIntervalMult?: number;
-  /** Прибавка к урону пули: база — слабый пистолет, силу даёт инженер. */
-  damage?: number;
-  /** +1 означает «пробивает ещё одного врага». */
-  pierce?: number;
-  /** Прирост радиуса разрыва как доля меньшей стороны поля. */
-  explosiveRadiusFactor?: number;
-  /** Прирост дальности автонаводки как доля меньшей стороны поля. */
-  autoRangeFactor?: number;
+  /** Прибавка к потолку Тока. */
+  chargeCap?: number;
+  /**
+   * Прибавка к Току за одну батарею — ПОВЕРХ уровня, а не вместо него: базовую
+   * ценность задаёт снабжение режима, иначе карта обесценивала бы рост уровня.
+   */
+  batteryBonus?: number;
+  /** Сколько батарей помещается на поле сверх уровня. */
+  extraBatterySlots?: number;
+  /** Множитель цены действий фигур (меньше — дешевле). */
+  costMult?: number;
+  /**
+   * Доля потолка, ниже которой Ток не утекает вовсе. Растёт со стопками: две
+   * карты защищают вдвое больше, а «Ёмкость» от этого перестаёт быть мёртвой —
+   * она растит защищённую часть пула.
+   */
+  decayReserve?: number;
   /** Предел турелей; при взятии карты турель ещё и ставится сразу. */
   maxTurrets?: number;
   maxDroneMines?: number;
@@ -67,10 +74,10 @@ export interface CardEffects {
   turretRateMult?: number;
   /** Множитель интервала стрельбы духов. */
   spiritRateMult?: number;
-  /** Крос ИНЖЕНЕР×МЕХАНИК: турели стреляют модификациями игрока. */
-  turretRounds?: boolean;
-  /** Крос ИНЖЕНЕР×СУММОНЕР: духи стреляют модификациями игрока. */
-  spiritRounds?: boolean;
+  /** Крос ЭНЕРГЕТИК×МЕХАНИК: выстрел турели идёт насквозь. */
+  turretPierce?: number;
+  /** Крос ЭНЕРГЕТИК×СУММОНЕР: выстрел духа идёт насквозь. */
+  spiritPierce?: number;
   /** Крос МЕХАНИК×СУММОНЕР: мот после укуса сразу ищет новую цель. */
   moteFastRechase?: boolean;
 }
@@ -90,52 +97,51 @@ export interface Card {
 }
 
 export const CARDS: readonly Card[] = [
-  // Инженер — оружие.
+  // Энергетик — Ток: ёмкость, батареи и цена действий фигур. Ствола в забеге
+  // нет, поэтому ветка отвечает не за силу выстрела, а за то, сколько его
+  // вообще будет: без батарей фигуры молчат.
   {
-    id: 'eng_rof',
-    branch: 'engineer',
-    title: 'Скорострельность',
-    blurb: 'Ствол стреляет на 20% чаще.',
+    id: 'nrg_cap',
+    branch: 'energy',
+    title: 'Ёмкость',
+    blurb: 'Потолок Тока выше на 8.',
     maxStacks: 3,
-    effects: { fireIntervalMult: 0.8 },
-  },
-  // Урон ступенчатый (пуля 1 -> 2), поэтому одна карта удваивала силу ствола и
-  // была ценнее любой другой. Плата темпом возвращает её в один ряд с остальными:
-  // тяжёлая пуля бьёт больно, но реже, и по толпе слабых врагов темп всё ещё
-  // выигрывает.
-  {
-    id: 'eng_caliber',
-    branch: 'engineer',
-    title: 'Калибр',
-    blurb: 'Пуля бьёт на 1 больше, но ствол стреляет на 20% реже.',
-    maxStacks: 2,
-    effects: { damage: 1, fireIntervalMult: 1.2 },
+    effects: { chargeCap: 8 },
   },
   {
-    id: 'eng_pierce',
-    branch: 'engineer',
-    title: 'Пробивные',
-    blurb: 'Пуля проходит сквозь лишнего врага.',
-    maxStacks: 2,
-    effects: { pierce: 1 },
+    id: 'nrg_cell',
+    branch: 'energy',
+    title: 'Плотная батарея',
+    blurb: 'Батарея даёт на 2 Тока больше.',
+    maxStacks: 3,
+    effects: { batteryBonus: 2 },
   },
   {
-    id: 'eng_he',
-    branch: 'engineer',
-    title: 'Разрывные',
-    blurb: 'Попадание бьёт по площади вокруг цели.',
+    id: 'nrg_field',
+    branch: 'energy',
+    title: 'Сборка',
+    blurb: 'На поле помещается ещё одна батарея.',
     maxStacks: 2,
-    effects: { explosiveRadiusFactor: 0.09 },
+    effects: { extraBatterySlots: 1 },
   },
-  // Дальний бой — не базовая настройка, а покупка: базовая автонаводка короче
-  // дистанции появления врага, поэтому без этой карты к цели надо подходить.
   {
-    id: 'eng_sniper',
-    branch: 'engineer',
-    title: 'Снайпер',
-    blurb: 'Ствол бьёт дальше: цель берётся на подлёте, а не в упор.',
+    id: 'nrg_economy',
+    branch: 'energy',
+    title: 'Экономия',
+    blurb: 'Действия фигур стоят на 15% меньше.',
+    maxStacks: 3,
+    effects: { costMult: 0.85 },
+  },
+  {
+    // Id переименован вместе с эффектом: старая «Удержание» множила затухание,
+    // новая «Резерв» держит его порогом. Старые записи забегов содержат
+    // nrg_hold — это они сами, отчёт по ним читается в старом смысле карты.
+    id: 'nrg_reserve',
+    branch: 'energy',
+    title: 'Резерв',
+    blurb: 'Пул не течёт, пока в нём меньше двух делений из десяти.',
     maxStacks: 2,
-    effects: { autoRangeFactor: 0.12 },
+    effects: { decayReserve: 0.2 },
   },
   // Механик — устройства на поле.
   {
@@ -191,20 +197,20 @@ export const CARDS: readonly Card[] = [
   // второй ветке уже есть вложения. Одна карта на пару — здесь собирается тот
   // самый гибрид, за который игрок платит уровнями.
   {
-    id: 'cross_turret_rounds',
-    crossPair: ['engineer', 'mechanic'],
-    title: 'Турельные патроны',
-    blurb: 'Турели бьют твоими патронами: пробой и разрыв переносятся на них.',
+    id: 'cross_turret_pierce',
+    crossPair: ['energy', 'mechanic'],
+    title: 'Бронебойные турели',
+    blurb: 'Выстрел турели проходит сквозь лишнего врага.',
     maxStacks: 1,
-    effects: { turretRounds: true },
+    effects: { turretPierce: 1 },
   },
   {
-    id: 'cross_spirit_rounds',
-    crossPair: ['engineer', 'summoner'],
+    id: 'cross_spirit_pierce',
+    crossPair: ['energy', 'summoner'],
     title: 'Духи-наводчики',
-    blurb: 'Духи бьют твоими патронами: пробой и разрыв переносятся на них.',
+    blurb: 'Выстрел духа проходит сквозь лишнего врага.',
     maxStacks: 1,
-    effects: { spiritRounds: true },
+    effects: { spiritPierce: 1 },
   },
   {
     id: 'cross_swarm_rechase',
@@ -218,20 +224,24 @@ export const CARDS: readonly Card[] = [
 
 /** Собранный за забег билд: и цифры, и история выбора. */
 export interface BuildState {
-  fireIntervalMult: number;
-  damage: number;
-  pierce: number;
-  explosiveRadiusFactor: number;
-  /** Дальность автонаводки: стартует с базовой из tuning и растёт картами. */
-  autoRangeFactor: number;
+  /** Потолок Тока: стартует с базового из tuning и растёт картами. */
+  chargeCap: number;
+  /** Ток за одну батарею — ПОПРАВКА к уровню, который даёт снабжение режима. */
+  batteryBonus: number;
+  /** Сколько батарей помещается на поле сверх уровня. */
+  extraBatterySlots: number;
+  /** Множитель цены действий фигур. */
+  costMult: number;
+  /** Доля потолка, ниже которой Ток не утекает. */
+  decayReserve: number;
   maxTurrets: number;
   maxDroneMines: number;
   maxSpirits: number;
   maxSwarms: number;
   turretRateMult: number;
   spiritRateMult: number;
-  turretRounds: boolean;
-  spiritRounds: boolean;
+  turretPierce: number;
+  spiritPierce: number;
   moteFastRechase: boolean;
   /** Профессия забега: ветка, которая набрала порог карт. До этого — null. */
   specialty: BranchId | null;
@@ -243,19 +253,21 @@ export interface BuildState {
 
 export function createBuild(): BuildState {
   return {
-    fireIntervalMult: 1,
-    damage: 0,
-    pierce: 0,
-    explosiveRadiusFactor: 0,
-    autoRangeFactor: TUNING.weapon.targetRangeFactor,
+    chargeCap: TUNING.charge.capBase,
+    // Снабжение уровня приходит из supply на каждый шаг, а билд держит только
+    // ПОПРАВКУ карт: два независимых источника батарейной цены разъехались бы.
+    batteryBonus: 0,
+    extraBatterySlots: 0,
+    costMult: 1,
+    decayReserve: 0,
     maxTurrets: 0,
     maxDroneMines: 0,
     maxSpirits: 0,
     maxSwarms: 0,
     turretRateMult: 1,
     spiritRateMult: 1,
-    turretRounds: false,
-    spiritRounds: false,
+    turretPierce: 0,
+    spiritPierce: 0,
     moteFastRechase: false,
     specialty: null,
     stacks: {},
@@ -292,19 +304,19 @@ export function applyCard(build: BuildState, card: Card): boolean {
   build.order.push(card.id);
 
   const e = card.effects;
-  if (e.fireIntervalMult !== undefined) build.fireIntervalMult *= e.fireIntervalMult;
-  if (e.damage !== undefined) build.damage += e.damage;
-  if (e.pierce !== undefined) build.pierce += e.pierce;
-  if (e.explosiveRadiusFactor !== undefined) build.explosiveRadiusFactor += e.explosiveRadiusFactor;
-  if (e.autoRangeFactor !== undefined) build.autoRangeFactor += e.autoRangeFactor;
+  if (e.chargeCap !== undefined) build.chargeCap += e.chargeCap;
+  if (e.batteryBonus !== undefined) build.batteryBonus += e.batteryBonus;
+  if (e.extraBatterySlots !== undefined) build.extraBatterySlots += e.extraBatterySlots;
+  if (e.costMult !== undefined) build.costMult *= e.costMult;
+  if (e.decayReserve !== undefined) build.decayReserve += e.decayReserve;
   if (e.maxTurrets !== undefined) build.maxTurrets += e.maxTurrets;
   if (e.maxDroneMines !== undefined) build.maxDroneMines += e.maxDroneMines;
   if (e.maxSpirits !== undefined) build.maxSpirits += e.maxSpirits;
   if (e.maxSwarms !== undefined) build.maxSwarms += e.maxSwarms;
   if (e.turretRateMult !== undefined) build.turretRateMult *= e.turretRateMult;
   if (e.spiritRateMult !== undefined) build.spiritRateMult *= e.spiritRateMult;
-  if (e.turretRounds) build.turretRounds = true;
-  if (e.spiritRounds) build.spiritRounds = true;
+  if (e.turretPierce !== undefined) build.turretPierce += e.turretPierce;
+  if (e.spiritPierce !== undefined) build.spiritPierce += e.spiritPierce;
   if (e.moteFastRechase) build.moteFastRechase = true;
 
   // Профессия закрепляется ровно в момент порога и больше не меняется: это
