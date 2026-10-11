@@ -85,8 +85,8 @@ export interface BotRunRecord {
   dropTok: number;
   spent: number;
   incomePerSec: number;
-  drySec: number;
-  idlePercent: number;
+  /** Пик занятого залога за прогон: это и есть цена живого выводка. */
+  heldMax: number;
   refusals: number;
   minCharge: number;
   /** Сколько шагов симуляции прошло: стенд обязан отчитываться и об этом. */
@@ -228,8 +228,7 @@ function record(s: BotScene, steps: number, died: boolean): BotRunRecord {
     dropTok: round(stats.dropTok, 1),
     spent: round(stats.chargeSpent, 1),
     incomePerSec: round(income / Math.max(timeSec, 0.01), 2),
-    drySec: round(stats.dryMs / 1000, 1),
-    idlePercent: round((stats.dryMs / Math.max(stats.timeMs, 1)) * 100, 1),
+    heldMax: round(stats.heldMax, 1),
     refusals: stats.dryRefusals,
     minCharge: Number.isFinite(stats.minCharge) ? round(stats.minCharge, 1) : 0,
     steps,
@@ -289,7 +288,7 @@ export interface SweepSummary {
   levelMedian: number;
   incomePerSecMedian: number;
   refusalsMedian: number;
-  idlePercentMedian: number;
+  heldMaxMedian: number;
   minChargeMedian: number;
   /** Самая частая первая карта: по ней видно, что бот вообще брал. */
   firstPick: string;
@@ -320,7 +319,7 @@ export function summarize(rows: readonly BotRunRecord[], opts: { immortal: boole
     levelMedian: median(rows.map((r) => r.level)),
     incomePerSecMedian: round(median(rows.map((r) => r.incomePerSec)), 2),
     refusalsMedian: median(rows.map((r) => r.refusals)),
-    idlePercentMedian: round(median(rows.map((r) => r.idlePercent)), 1),
+    heldMaxMedian: round(median(rows.map((r) => r.heldMax)), 1),
     minChargeMedian: round(median(rows.map((r) => r.minCharge)), 1),
     firstPick,
   };
@@ -335,7 +334,7 @@ export function formatSweep(summary: SweepSummary): string {
     `  время: min ${t.min} / медиана ${t.median} / max ${t.max} с`,
     `  дольше минуты: ${Math.round(summary.shareOverMinute * 100)}%`,
     `  убийств (медиана): ${summary.killsMedian}, уровень: ${summary.levelMedian}`,
-    `  доход: ${summary.incomePerSecMedian} Ток/с, простой: ${summary.idlePercentMedian}%, отказов: ${summary.refusalsMedian}`,
+    `  доход: ${summary.incomePerSecMedian} Ток/с, занято: ${summary.heldMaxMedian} (пик), отказов: ${summary.refusalsMedian}`,
     `  минимум пула (медиана): ${summary.minChargeMedian}`,
     `  частая первая карта: ${summary.firstPick}`,
   ];
@@ -354,7 +353,7 @@ export function formatRows(rows: readonly BotRunRecord[]): string[] {
       `доход ${r.batteryTok}+${r.dropTok}`,
       `расход ${r.spent}`,
       `мин ${r.minCharge}`,
-      `простой ${r.idlePercent}%`,
+      `занято ${r.heldMax}`,
       `отказов ${r.refusals}`,
       `взято: ${r.picks.join(', ') || '—'}`,
     ].join(' · '),

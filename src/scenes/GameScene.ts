@@ -43,14 +43,24 @@ import {
 } from '../core/runStats';
 import { copyText, HISTORY_KEY, INTRO_KEY, loadText, saveText } from '../core/store';
 import { isTouchDevice, VIEW } from '../core/viewport';
-import { Ally, deployCost, isWingKind, type AllyContext, type AllyKind } from '../entities/ally';
+import {
+  Ally,
+  deployCost,
+  holdCost,
+  isWingKind,
+  type AllyContext,
+  type AllyKind,
+} from '../entities/ally';
 import { Enemy } from '../entities/enemy';
 import { enemySpawnIntervalAt, enemyTargetCount } from '../systems/pressure';
 import { FixedStep } from '../sim/fixedStep';
 import {
   add,
+  avail,
   chargeNorm,
+  clearHold,
   createCharge,
+  hold,
   setCap,
   spend,
   stepCharge,
@@ -300,6 +310,9 @@ export class GameScene extends Phaser.Scene {
     this.wingSlots = 0;
     this.wingsToldAbout = false;
     this.dryTold = false;
+    // Порядок важен: сначала снять залог прошлого забега, потом потолок (он
+    // подрезает пул по свободному Току), и только затем выдать стартовый запас.
+    clearHold(this.charge);
     setCap(this.charge, this.build.chargeCap);
     this.charge.amount = TUNING.charge.start;
     this.supply = supplyAt(this.mode, this.level);
@@ -396,7 +409,12 @@ export class GameScene extends Phaser.Scene {
     // без старой стаи забег не может начаться вовсе. Пара батарей рядом даёт
     // первые секунды на подбор, а не на выживание без ответа.
     const startMotes = TUNING.progression.startSwarms * TUNING.progression.motesPerSwarm;
-    for (let i = 0; i < startMotes; i++) this.addAlly('mote', this.pos);
+    for (let i = 0; i < startMotes; i++) {
+      // Стартовая стая тоже держит залог: правило залога — общее для всех фигур,
+      // иначе первые секунды игрались бы по другим правилам, чем остальной забег.
+      hold(this.charge, holdCost('mote'));
+      this.addAlly('mote', this.pos);
+    }
     for (let i = 0; i < 2; i++) this.spawnBattery();
 
     this.profile.seed = this.seed;
@@ -696,14 +714,15 @@ export class GameScene extends Phaser.Scene {
     this.shots.step(dt, this.allyContext);
     stepCharge(this.charge, dt, TUNING.charge.decayPerSec, this.build.decayReserve);
     // Телеметрия читает пул ПОСЛЕ всех трат шага: иначе минимум был бы завышен.
-    stepStats(this.stats, dt, this.charge.amount, this.allies.length);
+    // Вместо простоя фигур считаем залог: он и есть цена живого выводка.
+    stepStats(this.stats, dt, this.charge.amount, this.charge.held);
 
     // Подсказки первого забега: по одной, и только когда экран свободен.
     if (this.toast === undefined) {
       const hint = nextHint(this.intro, {
         batteries: this.stats.batteries,
         spent: this.stats.chargeSpent,
-        dryMs: this.stats.dryMs,
+        refusals: this.stats.dryRefusals,
         idleMs: this.idleMs,
       });
       if (hint) this.showToast(hint, '#ffe066');
@@ -1085,10 +1104,15 @@ export class GameScene extends Phaser.Scene {
   private deployUpTo(kind: AllyKind, limit: number): void {
     while (this.countAllies(kind) < limit) {
       const price = deployCost(kind) * this.build.costMult;
-      if (!spend(this.charge, price)) {
+      const pledge = holdCost(kind);
+      // Проверка ДО трат: цена плюс залог обязаны уместиться в свободный Ток.
+      // Иначе неудачный залог оставил бы цену списанной, а фигуру — непоставленной.
+      if (this.charge.amount < price || avail(this.charge) < price + pledge) {
         this.reportDeployDry();
         return;
       }
+      hold(this.charge, pledge);
+      spend(this.charge, price);
       noteSpend(this.stats, price);
       this.addAlly(kind, this.pos);
     }
@@ -1445,7 +1469,10 @@ export class GameScene extends Phaser.Scene {
     const picked = this.lastPickTitle ? `  взято: ${this.lastPickTitle}` : '';
     // Шкала Тока видна всегда: это единственный ресурс забега, а не украшение
     // одной из веток.
-    const charge = `  ток: ${chargeBar(this.charge)}`;
+    // Занятый Ток виден числом: без него непонятно, почему шкала не полна при
+    // живом выводке — а это и есть цена силы фигур.
+    const busy = this.charge.held > 0 ? ` занято ${this.charge.held}` : '';
+    const charge = `  ток: ${chargeBar(this.charge)}${busy}`;
     this.pickLine.setText(
       `ур. ${this.level}  опыт: ${this.xp}/${xpForNextLevel(this.level)}${picked}${charge}`,
     );

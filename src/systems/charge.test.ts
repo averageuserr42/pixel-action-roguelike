@@ -1,7 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TUNING } from '../config/tuning';
-import { add, baseCap, canAfford, chargeNorm, createCharge, setCap, spend, stepCharge } from './charge';
+import {
+  add,
+  avail,
+  baseCap,
+  canAfford,
+  chargeNorm,
+  clearHold,
+  createCharge,
+  hold,
+  release,
+  setCap,
+  spend,
+  stepCharge,
+} from './charge';
 import { supplyAt } from './supply';
 
 /** Ценность батареи приходит из снабжения: она растёт с уровнем, а не константа. */
@@ -84,6 +97,50 @@ test('больший потолок — больший защищённый за
   stepCharge(big, 600, 1, 0.2);
   assert.equal(small.amount, 20 * 0.2);
   assert.equal(big.amount, 44 * 0.2, '«Ёмкость» обязана защищать больше Тока');
+});
+
+test('залог занимает бюджет: живая фигура держит свой Ток', () => {
+  const c = createCharge(20);
+  add(c, 20);
+  assert.equal(hold(c, 15), true);
+  assert.equal(avail(c), 5);
+  assert.equal(c.amount, 5, 'залог обязан подрезать уже набранный пул');
+  // Свободного Тока пять — шестёрку ни оплатить, ни занять больше нельзя.
+  assert.equal(canAfford(c, 6), false);
+  assert.equal(spend(c, 6), false);
+  assert.equal(hold(c, 1), true);
+  release(c, 16);
+  assert.equal(avail(c), 20);
+  // Залог больше потолка не берётся: фигура без покрытия — это бюджет фикций.
+  assert.equal(hold(c, 21), false);
+  assert.equal(avail(c), 20);
+});
+
+test('рост потолка подрезает пул по свободному остатку, а не по потолку', () => {
+  const c = createCharge(20);
+  add(c, 20);
+  hold(c, 12);
+  assert.equal(c.amount, 8, 'залог подрезает уже набранный пул');
+  setCap(c, 24);
+  assert.equal(avail(c), 12);
+  assert.equal(c.amount, 8, 'рост потолка не должен затирать подрезку по залогу');
+  assert.ok(chargeNorm(c) <= 1, `норма пула вылезла за единицу: ${chargeNorm(c)}`);
+  setCap(c, 8);
+  assert.equal(avail(c), 0);
+  assert.equal(c.amount, 0, 'потолок ниже залога — свободного Тока нет вовсе');
+});
+
+test('новый забег начинается без залога прошлого', () => {
+  const c = createCharge(20);
+  add(c, 20);
+  hold(c, 16);
+  // Сцена переживает перезапуск: без сброса залог прошлого забега остался бы.
+  clearHold(c);
+  setCap(c, baseCap());
+  c.amount = TUNING.charge.start;
+  assert.equal(avail(c), baseCap());
+  assert.equal(c.amount, TUNING.charge.start);
+  assert.equal(chargeNorm(c), c.amount / baseCap());
 });
 
 test('полный цикл: батареи оплачивают постановку турелей', () => {

@@ -8,6 +8,10 @@
  * платят за движение, осколки — за урон. Пока числа лежали в одной куче, нельзя
  * было ответить на главный вопрос баланса — «хватает ли забегу энергии, когда он
  * вкладывается в урон, или весь доход приносят ноги».
+ *
+ * Расход и залог — тоже разведены: расход это цена постановок, а залог — доля
+ * бюджета, которую держат живые фигуры. По этим двум числам видно, что именно
+ * мешает поставить следующую фигуру: нехватка дохода или маленький потолок.
  */
 export interface RunStats {
   /** Сколько длился забег. */
@@ -21,15 +25,18 @@ export interface RunStats {
   drops: number;
   /** Сколько Тока дали осколки. */
   dropTok: number;
-  /** Сколько Тока списано действиями фигур. */
+  /** Сколько Тока списано постановками фигур. */
   chargeSpent: number;
-  /** Сколько миллисекунд фигуры стояли с пустым пулом. */
-  dryMs: number;
   /**
-   * Сколько раз фигура отказалась действовать из-за пустого пула. Считается
-   * СОБЫТИЕМ: одна неоплаченная попытка за свой интервал действия, а не каждый
-   * шаг переспроса — иначе число врало бы на порядок.
+   * Сколько Тока было занято фигурами на пике забега.
+   *
+   * Это и есть цена силы выводка: фигура больше не платит за выстрел, она держит
+   * долю бюджета, поэтому рост билда видно именно здесь. Раньше на этом месте был
+   * «простой фигур» — после смены контракта он ничего не значит: фигуры работают
+   * без Тока, а пустой пул — это нормальное состояние «копию на следующую».
    */
+  heldMax: number;
+  /** Сколько раз не хватило Тока на постановку фигуры. */
   dryRefusals: number;
   /**
    * Самый низкий уровень Тока в бою. Ноль здесь — не трагедия, а факт: по
@@ -47,18 +54,23 @@ export function createRunStats(): RunStats {
     drops: 0,
     dropTok: 0,
     chargeSpent: 0,
-    dryMs: 0,
+    heldMax: 0,
     dryRefusals: 0,
     minCharge: Infinity,
   };
 }
 
-/** Один шаг забега: время, простой фигур и минимум пула. */
-export function stepStats(stats: RunStats, dt: number, chargeAmount: number, figures: number): void {
+/** Один шаг забега: время, минимум свободного Тока и пик занятого залога. */
+export function stepStats(
+  stats: RunStats,
+  dt: number,
+  chargeAmount: number,
+  held: number,
+): void {
   const ms = dt * 1000;
   stats.timeMs += ms;
   if (chargeAmount < stats.minCharge) stats.minCharge = chargeAmount;
-  if (figures > 0 && chargeAmount <= 0.01) stats.dryMs += ms;
+  if (held > stats.heldMax) stats.heldMax = held;
 }
 
 export function noteKill(stats: RunStats): void {
@@ -118,8 +130,8 @@ export function formatStats(stats: RunStats, head: StatsHead): string[] {
     `ур. ${head.level} · ${head.specialtyTitle ?? 'без профессии'} · убито ${stats.kills}`,
     `доход: батарей ${stats.batteries} → ${Math.round(stats.batteryTok)}` +
       ` · осколков ${stats.drops} → ${Math.round(stats.dropTok)}`,
-    `расход ${Math.round(stats.chargeSpent)} · минимум ${Math.round(min)}` +
-      ` · простой ${formatClock(stats.dryMs)} · отказов ${stats.dryRefusals}`,
+    `расход ${Math.round(stats.chargeSpent)} · занято ${Math.round(stats.heldMax)}` +
+      ` · минимум ${Math.round(min)} · отказов ${stats.dryRefusals}`,
     `взято: ${head.picks.length > 0 ? head.picks.join(', ') : '—'}`,
   ];
 }

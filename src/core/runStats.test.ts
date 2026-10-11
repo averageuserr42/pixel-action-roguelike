@@ -44,16 +44,17 @@ test('счётчики складываются, ноль на старте', ()
   assert.equal(s.dryRefusals, 1);
 });
 
-test('простой считается только при живых фигурах и пустом пуле', () => {
+test('пик залога берётся по максимуму, а не по последнему шагу', () => {
   const s = createRunStats();
-  stepStats(s, 1, 5, 2);
-  assert.equal(s.dryMs, 0, 'с Током простоя нет');
-  stepStats(s, 1, 0, 0);
-  assert.equal(s.dryMs, 0, 'без фигур молчание никого не волнует');
-  stepStats(s, 2, 0, 2);
-  assert.equal(s.dryMs, 2000);
-  assert.equal(s.timeMs, 4000);
+  stepStats(s, 1, 5, 4);
+  assert.equal(s.heldMax, 4);
+  // Пул тает до нуля, залог при этом никуда не девается: фигуры-то стоят.
+  stepStats(s, 2, 0, 4);
+  assert.equal(s.heldMax, 4);
   assert.equal(s.minCharge, 0);
+  assert.equal(s.timeMs, 3000);
+  stepStats(s, 1, 3, 9);
+  assert.equal(s.heldMax, 9);
 });
 
 test('минимум пула не сбивается нулём на старте', () => {
@@ -87,6 +88,7 @@ test('отчёт опознаёт забег, разводит доход по �
   assert.ok(lines[2].includes('батарей 1 → 6'), lines[2]);
   assert.ok(lines[2].includes('осколков 1 → 2'), lines[2]);
   assert.ok(lines[3].includes('расход 4'), lines[3]);
+  assert.ok(lines[3].includes('занято 2'), lines[3]);
   assert.ok(lines[3].includes('минимум 3'), lines[3]);
   assert.ok(lines[4].includes('nrg_cap, mech_turret'), lines[4]);
 });

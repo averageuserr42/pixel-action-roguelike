@@ -51,6 +51,24 @@ export function deployCost(kind: AllyKind): number {
   }
 }
 
+/**
+ * Залог фигуры: сколько Тока она держит, пока стоит на поле. Постановка — плата
+ * один раз, залог — постоянная доля бюджета; вместе они делают ветку энергии
+ * нужной, не возвращая налога за каждое действие.
+ */
+export function holdCost(kind: AllyKind): number {
+  switch (kind) {
+    case 'turret':
+      return TUNING.charge.holdTurret;
+    case 'drone':
+      return TUNING.charge.holdDrone;
+    case 'spirit':
+      return TUNING.charge.holdSpirit;
+    case 'mote':
+      return TUNING.charge.holdMote;
+  }
+}
+
 export interface AllyContext {
   playerPos: Vec2;
   /** Куда смотрит игрок: от этого направления строится крыло. */

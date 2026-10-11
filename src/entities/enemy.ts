@@ -49,12 +49,11 @@ export function enemyChargeSpeedForLevel(level: number, mode: RunMode): number {
 export class Enemy {
   readonly arc: Phaser.GameObjects.Arc;
   /**
-   * Кольцо-телеграф: где именно и когда ударит выпад. Враги, выпад и снаряды —
-   * всё это круги, и угрозу приходилось читать по цвету, а смерть приходила за
-   * 500 мс. Видимая точка удара — единственное, что отличает замах от просто
-   * красного круга.
+   * Полоса-телеграф: КУДА пойдёт выпад. Показывает направление, но не конец —
+   * точку удара игрок считает сам. Кольцо в самой точке (первая версия) читалось
+   * как готовая подсказка: выйти из круга — и всё, замах больше ничему не учил.
    */
-  private readonly tele: Phaser.GameObjects.Arc;
+  private readonly tele: Phaser.GameObjects.Rectangle;
   readonly pos: Vec2;
   /** HP на момент появления: константа врага, а не «сколько осталось». */
   readonly maxHp: number;
@@ -123,8 +122,8 @@ export class Enemy {
     this.arc = scene.add.circle(at.x, at.y, TUNING.enemy.radius, STATE_COLOR.seek).setDepth(9);
     if (this.maxHp > TUNING.enemy.maxHp) this.arc.setStrokeStyle(1, SCALED_STROKE_COLOR);
     this.tele = scene.add
-      .circle(at.x, at.y, TUNING.enemy.radius, STATE_COLOR.windup, 0)
-      .setStrokeStyle(2, STATE_COLOR.windup)
+      .rectangle(at.x, at.y, 1, 2, STATE_COLOR.windup, 0.4)
+      .setOrigin(0, 0.5)
       .setDepth(8)
       .setVisible(false);
   }
@@ -350,15 +349,17 @@ export class Enemy {
     const pulse = windup ? 1 + 0.35 * Math.sin(this.timerMs * 0.03) : 1;
     this.arc.setScale(pulse);
 
-    // Кольцо садится к точке удара по мере отсчёта, а к моменту выпада становится
-    // ярче: размер и цвет вместе говорят, где и когда будет удар.
+    // Полоса лежит НА теле врага и растёт в сторону прицела: направление видно,
+    // а конец не отмечен — место удара игрок считает сам. Яркость поднимается к
+    // выпаду, поэтому отсчёт читается без второго маркера.
     this.tele.setVisible(windup);
     if (windup) {
       const left = Math.max(0, Math.min(1, this.timerMs / this.windupMs));
-      const reach = this.windupRange * TUNING.enemy.telegraphFactor;
-      this.tele.setPosition(this.aim.x, this.aim.y);
-      this.tele.setRadius(reach * (0.35 + 0.65 * left));
-      this.tele.setAlpha(0.4 + 0.6 * (1 - left));
+      const len = this.windupRange * TUNING.enemy.telegraphLenFactor;
+      this.tele.setPosition(this.pos.x, this.pos.y);
+      this.tele.setDisplaySize(len, this.tele.height);
+      this.tele.setRotation(Math.atan2(this.aim.y - this.pos.y, this.aim.x - this.pos.x));
+      this.tele.setAlpha(0.15 + 0.35 * (1 - left));
     }
   }
 
