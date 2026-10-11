@@ -81,6 +81,7 @@ import {
 } from '../systems/charge';
 import { eliteNumbers, pickSpawn, type KindCounts } from '../systems/spawnDirector';
 import { pickFocusTarget } from '../systems/targeting';
+import { absorb, createArmor, stepArmor, type ArmorState } from '../systems/armor';
 import {
   addPickup,
   collect,
@@ -106,6 +107,8 @@ import { Juice } from '../ui/juice';
  */
 const PLAYER_IFRAMES_COLOR = 0xffffff;
 const PLAYER_DEAD_COLOR = 0x3a3550;
+/** Щит дальнего боя: свой цвет, потому что своё — это ресурс, а не состояние. */
+const SHIELD_COLOR = 0x8ef0b0;
 const BATTERY_COLOR = 0xffd23f;
 /**
  * Осколок цвета чистой энергии: он обязан отличаться и от батареи (жёлтой), и
@@ -242,6 +245,11 @@ export class GameScene extends Phaser.Scene {
   private pickupArcs: Phaser.GameObjects.Image[] = [];
   /** Что собрал этот шаг. Переиспользуется: подбор идёт каждые 8 мс. */
   private readonly tally: PickupTally = createTally();
+  /**
+   * Броня дальнего боя (systems/armor). Живёт в сцене, потому что только сцена
+   * знает канал удара: тело врага идёт мимо брони, снаряд и взрыв — через неё.
+   */
+  private armor: ArmorState = createArmor(TUNING.player.armorLayers, TUNING.player.armorRegenMs);
 
   /** Переиспользуемый контекст спутников: в игровом шаге нет аллокаций. */
   private readonly allyContext: AllyContext = {
@@ -320,6 +328,9 @@ export class GameScene extends Phaser.Scene {
     this.iFramesT = 0;
     this.dashBufferT = 0;
     this.hp = TUNING.player.hits;
+    // Броня сбрасывается вместе с пулом жизней: сцена переживает перезапуск,
+    // и заряженный щит прошлого забега был бы чужим подарком.
+    this.armor = createArmor(TUNING.player.armorLayers, TUNING.player.armorRegenMs);
     this.vel = { x: 0, y: 0 };
     this.prevVel.x = 0;
     this.prevVel.y = 0;
@@ -781,6 +792,7 @@ export class GameScene extends Phaser.Scene {
 
     this.shots.step(dt, this.allyContext);
     stepCharge(this.charge, dt, TUNING.charge.decayPerSec, this.build.decayReserve);
+    stepArmor(this.armor, dt);
     // Телеметрия читает пул ПОСЛЕ всех трат шага: иначе минимум был бы завышен.
     // Вместо простоя фигур считаем залог: он и есть цена живого выводка.
     stepStats(this.stats, dt, this.charge.amount, this.charge.held);
@@ -1114,9 +1126,22 @@ export class GameScene extends Phaser.Scene {
     if (distance(this.pos, e.pos) <= TUNING.enemy.volatileBlastRadius) this.hitByShot();
   }
 
-  /** Попадание враждебного выстрела: тот же пул ошибок, что и контакт. */
+  /**
+   * Дальний урон: снаряд стрелка и взрыв нестабильной элиты. Раньше шёл тем же
+   * путём, что и контакт, и стрелок снимал весь пул ошибок без ответа (замер
+   * плана «виды врагов»). Теперь дальний сначала идёт через броню: слой гасит
+   * его целиком и даёт широкое окно неуязвимости — залп обязан стоить один
+   * слой, а не весь запас. Контакт в упор броню игнорирует принципиально.
+   */
   private hitByShot(): void {
     if (this.iFramesT > 0) return;
+    if (absorb(this.armor, 'ranged')) {
+      this.iFramesT = TUNING.player.armorHitInvulnMs;
+      this.sfx.play('hit');
+      this.juice.burst(this.pos.x, this.pos.y, SHIELD_COLOR, 'hit');
+      this.juice.popup(this.pos.x, this.pos.y - TUNING.player.radius * 4, 'ЩИТ', '#8ef0b0');
+      return;
+    }
     this.takeHit();
   }
 
@@ -1668,7 +1693,7 @@ export class GameScene extends Phaser.Scene {
     const lives =
       '█'.repeat(Math.max(0, this.hp)) + '░'.repeat(Math.max(0, TUNING.player.hits - this.hp));
     this.status.setText(
-      `жизни ${lives} · dash ${dash} · время ${formatClock(this.stats.timeMs)}${best ? ` · лучший ${formatClock(best.timeMs)}` : ''}`,
+      `жизни ${lives} · щит ${this.armor.charged > 0 ? '█' : '░'} · dash ${dash} · время ${formatClock(this.stats.timeMs)}${best ? ` · лучший ${formatClock(best.timeMs)}` : ''}`,
     );
 
     this.layoutHud();
