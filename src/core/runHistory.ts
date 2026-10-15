@@ -1,4 +1,4 @@
-import type { BranchId } from './progression';
+import { BRANCHES, type BranchId } from './progression';
 import { RUN_RECORD_VERSION, type ControlScheme, type RunMode } from './runRecord';
 
 /**
@@ -117,6 +117,10 @@ function asResult(value: unknown): RunResult | null {
   if (v.control !== 'keyboard' && v.control !== 'touch') return null;
   const specialty = v.specialty;
   if (specialty !== null && typeof specialty !== 'string') return null;
+  // Неизвестная ветка — не повод выбрасывать забег: сама запись честная, а
+  // чинится до безопасного значения только поле. Ветки переименовываются,
+  // а память остаётся, и мусор из хранилища не должен светиться в HUD.
+  const branch = BRANCHES.some((b) => b.id === specialty) ? (specialty as BranchId) : null;
   const picks = Array.isArray(v.picks) ? v.picks.filter((p): p is string => typeof p === 'string') : [];
   return {
     version: RUN_RECORD_VERSION,
@@ -127,7 +131,7 @@ function asResult(value: unknown): RunResult | null {
     timeMs: v.timeMs,
     level: v.level,
     kills: v.kills,
-    specialty: (specialty as BranchId | null) ?? null,
+    specialty: branch,
     picks,
     valid: v.valid !== false,
   };

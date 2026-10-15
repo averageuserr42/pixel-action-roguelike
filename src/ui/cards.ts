@@ -52,6 +52,8 @@ export class CardPicker {
   private title = '';
   private onPick: ((card: Card) => void) | null = null;
   private open = false;
+  /** Сниматели СВОИХ слушателей клавиш: см. конструктор. */
+  private readonly keyOffs: Array<() => void> = [];
 
   constructor(private readonly scene: Phaser.Scene) {
     this.dim = scene.add
@@ -74,8 +76,14 @@ export class CardPicker {
       ];
       codes.forEach((code, index) => {
         const key = kb.addKey(code);
-        key.off('down');
-        key.on('down', () => this.pick(this.cards[index]));
+        // Снимается только СВОЙ слушатель. Клавиши 1/2 общие с выбором режима
+        // на экране смерти (GameScene): addKey возвращает ОДИН объект Key на
+        // код, и общий `off('down')` молча выключал подбор карты с клавиатуры
+        // — 1 и 2 не работали, пока 3 работала. Нашёл смоук-тест упаковки
+        // (tools/qa/file-launch-smoke.mjs): нажатие «1» не закрывало панель.
+        const handler = (): void => this.pick(this.cards[index]);
+        key.on('down', handler);
+        this.keyOffs.push(() => key.off('down', handler));
       });
     }
 
@@ -150,6 +158,8 @@ export class CardPicker {
   }
 
   destroy(): void {
+    for (const off of this.keyOffs) off();
+    this.keyOffs.length = 0;
     this.dim.destroy();
     this.heading.destroy();
     for (const view of this.views) {

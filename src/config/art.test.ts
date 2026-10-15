@@ -9,13 +9,13 @@ import { ART, ART_FILES, artDivisor, artScale, artSize } from './art';
  * затем ширина и высота) и не тянет ради этого ни одной зависимости.
  */
 function pngSize(file: string): { w: number; h: number } {
-  const bytes = readFileSync(`public/assets/${file}`);
+  const bytes = readFileSync(`src/assets/${file}`);
   const signature = bytes.subarray(0, 8).toString('latin1');
   assert.equal(signature, '\x89PNG\r\n\x1a\n', `${file} — не PNG`);
   return { w: bytes.readUInt32BE(16), h: bytes.readUInt32BE(20) };
 }
 
-test('каждый спрайт из таблицы действительно лежит в public/assets', () => {
+test('каждый спрайт из таблицы действительно лежит в src/assets', () => {
   for (const spec of ART_FILES) {
     const size = pngSize(spec.file);
     assert.ok(size.w > 0 && size.h > 0, `${spec.file}: пустой PNG`);

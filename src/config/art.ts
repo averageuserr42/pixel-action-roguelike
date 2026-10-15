@@ -22,11 +22,14 @@
  * Ассеты: CC0 (общественное достояние), наборы Kenney —
  * `moreenemiesanimations` (все существа) и `topdown-shooter`, `abstract-platformer`
  * (предметы). Атрибуция не требуется, но источник указан в `public/assets/CREDITS.md`.
+ *
+ * Файлы спрайтов лежат в `src/assets` и встраиваются в сборку как data: URI
+ * (см. config/textures): игра обязана запускаться двойным кликом из файла.
  */
 export interface ArtSpec {
   /** Ключ текстуры в Phaser-лоадере. */
   key: string;
-  /** Имя файла в public/assets. */
+  /** Имя файла в src/assets; откуда его берёт браузер — в config/textures. */
   file: string;
   /** Высота на экране в игровых единицах. */
   height: number;

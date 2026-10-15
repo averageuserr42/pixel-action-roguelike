@@ -63,6 +63,12 @@ test('разбор хранилища терпим к мусору', () => {
   assert.equal(parsed[0].at, 7);
 });
 
+test('неизвестная профессия приводится к null, а забег остаётся', () => {
+  const parsed = parseHistory(JSON.stringify([{ ...result(), specialty: 'warrior' }]));
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].specialty, null);
+});
+
 test('подозрительные поля приводятся к безопасным значениям', () => {
   const parsed = parseHistory(JSON.stringify([{ ...result(), picks: [1, 'nrg_cap', null], valid: 'нет' }]));
   assert.deepEqual(parsed[0].picks, ['nrg_cap']);

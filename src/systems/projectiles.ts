@@ -45,6 +45,8 @@ interface Projectile {
   arc: Phaser.GameObjects.Arc;
   pos: Vec2;
   vel: Vec2;
+  /** Фактический радиус снаряда: враждебный крупнее своего. */
+  radius: number;
   lifeMs: number;
   damage: number;
   pierceLeft: number;
@@ -74,6 +76,7 @@ export class Projectiles {
           .setDepth(8),
         pos: { x: 0, y: 0 },
         vel: { x: 0, y: 0 },
+        radius: 0,
         lifeMs: 0,
         damage: 0,
         pierceLeft: 0,
@@ -116,7 +119,11 @@ export class Projectiles {
     free.vel.y = dir.y * spec.speed;
     free.arc.setPosition(free.pos.x, free.pos.y).setVisible(true);
     // Свой выстрел — мелкий и бледный, враждебный — крупнее и красный.
-    free.arc.setRadius(free.hostile ? HOSTILE_RADIUS : TUNING.shots.projectileRadius);
+    // Радиус живёт в снаряде, а не берётся общей константой: видимый круг и
+    // круг попадания обязаны совпадать — иначе крупный враждебный шар бил
+    // мелкой меткой (рисовался в 3 единицы, а проверялся как 2).
+    free.radius = free.hostile ? HOSTILE_RADIUS : TUNING.shots.projectileRadius;
+    free.arc.setRadius(free.radius);
     free.arc.setFillStyle(free.hostile ? HOSTILE_COLOR : PROJECTILE_COLOR);
   }
 
@@ -144,7 +151,7 @@ export class Projectiles {
         if (player) {
           const dx = player.pos.x - p.pos.x;
           const dy = player.pos.y - p.pos.y;
-          const r = TUNING.shots.projectileRadius + player.radius;
+          const r = p.radius + player.radius;
           if (dx * dx + dy * dy <= r * r) {
             player.hit();
             dead = true;
@@ -202,7 +209,7 @@ export class Projectiles {
 
   /** Первый враг, в которого попал снаряд (не тот, кого он задел шагом раньше). */
   private enemyAt(p: Projectile, enemies: Enemy[]): Enemy | null {
-    const reach = TUNING.shots.projectileRadius;
+    const reach = p.radius;
     for (const e of enemies) {
       if (e === p.lastHit) continue;
       // Труп живёт в списке до resolveKills: без этой проверки пробивающая пуля

@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { ART, ART_FILES, artScale } from '../config/art';
 import { TUNING } from '../config/tuning';
+import { textureUrl } from '../config/textures';
 import { createIntro, introMuted, muteIntro, nextHint, type IntroState } from '../core/intro';
 import { approach, clampToBounds, distance, type Vec2 } from '../core/math';
 import {
@@ -180,7 +181,6 @@ export class GameScene extends Phaser.Scene {
   private spawnTimerMs = 0;
   /** Угол кольца окружения: враги обходят игрока по кругу, а не стоят стеной. */
   private orbitT = 0;
-  private killed = 0;
   /**
    * Режим давления. Меняется только на экране смерти, иначе забег несравним.
    *
@@ -214,6 +214,8 @@ export class GameScene extends Phaser.Scene {
   private wingSlots = 0;
   /** Первый отказ фигур из-за пустого пула: тост показывается один раз за забег. */
   private dryTold = false;
+  /** Сниматели СВОИХ слушателей клавиш: клавиши 1/2 общие с панелью выбора. */
+  private readonly keyOffs: Array<() => void> = [];
 
   /** Собранный за забег билд: и цифры, и порядок выбора для записи. */
   private build: BuildState = createBuild();
@@ -319,7 +321,9 @@ export class GameScene extends Phaser.Scene {
    * в одном месте с его размером. Phaser ждёт preload до create сам.
    */
   preload(): void {
-    for (const art of ART_FILES) this.load.image(art.key, `assets/${art.file}`);
+    // Адреса берутся из config/textures: спрайты встроены в сборку как data: URI,
+    // поэтому игра запускается и из файла (file://), и с сервера одинаково.
+    for (const art of ART_FILES) this.load.image(art.key, textureUrl(art.file));
   }
 
   create(): void {
@@ -340,7 +344,6 @@ export class GameScene extends Phaser.Scene {
     this.enemies = [];
     this.spawnTimerMs = 0;
     this.orbitT = 0;
-    this.killed = 0;
     this.modeLabels = [];
     this.profileLocked = false;
     this.deathText = undefined;
@@ -453,12 +456,16 @@ export class GameScene extends Phaser.Scene {
     ];
     for (const [code, mode] of modeKeys) {
       const key = kb.addKey(code);
-      key.off('down');
-      key.on('down', () => {
+      // Снимается только СВОЙ слушатель: клавиши 1/2 общие с панелью выбора
+      // таланта (CardPicker), а addKey возвращает ОДИН объект Key на код —
+      // общий `off('down')` отключал бы подбор карты с клавиатуры целиком.
+      const handler = (): void => {
         if (!this.dead) return;
         this.mode = mode;
         this.restartRequested = true;
-      });
+      };
+      key.on('down', handler);
+      this.keyOffs.push(() => key.off('down', handler));
     }
     // На телефоне клавиши R нет, и после смерти единственным выходом оставалась
     // перезагрузка страницы. Касание экрана перезапускает забег.
@@ -505,6 +512,10 @@ export class GameScene extends Phaser.Scene {
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.scale.off(Phaser.Scale.Events.RESIZE, this.onResize);
       this.input.off('pointerdown', this.onDeathTap);
+      // Свои слушатели клавиш снимаются поимённо: сцена переживает перезапуск,
+      // и общий `off('down')` задел бы чужие обработчики на общих клавишах.
+      for (const off of this.keyOffs) off();
+      this.keyOffs.length = 0;
       // Эффекты живут на объектах сцены: без этого перезапуск оставлял бы их висеть.
       this.juice.destroy();
     });
@@ -1074,7 +1085,9 @@ export class GameScene extends Phaser.Scene {
       e.destroy();
       const index = this.enemies.indexOf(e);
       if (index >= 0) this.enemies.splice(index, 1);
-      this.killed++;
+      // Убитых считает ровно один счётчик (stats): второй, свойственный сцене,
+      // жил до этого рядом и мог разойтись с отчётом — они и так дублировали
+      // друг друга строка в строку.
       noteKill(this.stats);
       // Опыт — за ЦЕНУ цели, а не за факт убийства: иначе правильная работа
       // выводка (добить танка) наказывалась медленной прогрессией, а разгром
@@ -1663,7 +1676,7 @@ export class GameScene extends Phaser.Scene {
     // Режим — часть опознания забега: «обычный» и «хардкор» несравнимы между
     // собой, поэтому он виден в HUD, а не только в записи.
     const head = `сид ${this.seed}  ${MODE_TITLE[this.mode].toLowerCase()}${spec}`;
-    const tail = `убито: ${this.killed}${invalid}`;
+    const tail = `убито: ${this.stats.kills}${invalid}`;
 
     // Решение о переносе принимается ТОЛЬКО по ширине однострочного варианта:
     // измерять текущую форму нельзя — строки мигали бы между видами.
